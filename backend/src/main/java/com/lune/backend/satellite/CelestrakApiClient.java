@@ -10,7 +10,9 @@ import org.springframework.web.util.UriComponentsBuilder;
 import java.net.URI;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Component
 @RequiredArgsConstructor
@@ -18,14 +20,23 @@ import java.util.Optional;
 public class CelestrakApiClient {
 
     private static final String BASE_URL = "https://celestrak.org/NORAD/elements/gp.php";
+    private static final long GROUP_CACHE_TTL_MS = 3600_000; // 1 hour
 
     private final RestTemplate restTemplate;
+
+    private record CachedGroup(List<CelestrakSatelliteDto> data, long fetchedAt) {}
+    private final Map<String, CachedGroup> groupCache = new ConcurrentHashMap<>();
 
     /**
      * Fetch satellites by CelesTrak group name (e.g. "STARLINK", "GPS-OPS", "STATIONS").
      * Returns an empty list on failure.
      */
     public List<CelestrakSatelliteDto> getGroup(String group) {
+        String key = group.toUpperCase();
+        CachedGroup cached = groupCache.get(key);
+        if (cached != null && System.currentTimeMillis() - cached.fetchedAt() < GROUP_CACHE_TTL_MS) {
+            return cached.data();
+        }
         URI uri = UriComponentsBuilder.fromUriString(BASE_URL)
                 .queryParam("GROUP", group.toUpperCase())
                 .queryParam("FORMAT", "json")
@@ -33,7 +44,9 @@ public class CelestrakApiClient {
                 .toUri();
         try {
             CelestrakSatelliteDto[] arr = restTemplate.getForObject(uri, CelestrakSatelliteDto[].class);
-            return arr != null ? Arrays.asList(arr) : List.of();
+            List<CelestrakSatelliteDto> result = arr != null ? Arrays.asList(arr) : List.of();
+            groupCache.put(key, new CachedGroup(result, System.currentTimeMillis()));
+            return result;
         } catch (Exception e) {
             log.warn("CelesTrak group fetch failed for '{}': {}", group, e.getMessage());
             return List.of();

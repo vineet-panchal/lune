@@ -37,7 +37,7 @@ public class SatelliteController {
             @RequestParam(required = false) String group,
             @RequestParam(required = false) String type) {
         SatelliteListResponseDto body = satelliteService.getSatellites(
-            page, Math.min(pageSize, 50), search, sort, group, type);
+            page, Math.min(pageSize, 500), search, sort, group, type);
         return ResponseEntity.ok(body);
         }
 
@@ -87,18 +87,20 @@ public class SatelliteController {
             @RequestParam String ids,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) ZonedDateTime datetime) {
         Instant instant = datetime != null ? datetime.withZoneSameInstant(ZoneOffset.UTC).toInstant() : Instant.now();
-        List<SatellitePositionDto> positions = java.util.Arrays.stream(ids.split(","))
+        List<Integer> parsedIds = java.util.Arrays.stream(ids.split(","))
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
-                .limit(30)
+                .limit(500)
                 .map(s -> {
                     try { return Integer.parseInt(s); } catch (NumberFormatException e) { return null; }
                 })
                 .filter(java.util.Objects::nonNull)
+                .toList();
+        List<SatellitePositionDto> results = parsedIds.parallelStream()
                 .map(id -> satelliteService.getPosition(id, instant))
                 .filter(Optional::isPresent)
                 .map(Optional::get)
                 .toList();
-        return ResponseEntity.ok(positions);
+        return ResponseEntity.ok(results);
     }
 }

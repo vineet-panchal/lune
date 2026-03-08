@@ -46,9 +46,10 @@ public class TleApiClient {
      * @param sort optional sort: "popularity" (default), "name", etc.
      */
     public TleListResponseDto getTleList(int page, int pageSize, String search, String sort) {
+        int cappedPageSize = Math.min(pageSize, 100); // TLE API max is 100
         var builder = UriComponentsBuilder.fromUriString(baseUrl + "/api/tle/")
                 .queryParam("page", page)
-                .queryParam("page-size", pageSize);
+                .queryParam("page-size", cappedPageSize);
         if (search != null && !search.isBlank()) {
             builder.queryParam("search", search.strip());
         }
