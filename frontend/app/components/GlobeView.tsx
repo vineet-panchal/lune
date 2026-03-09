@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { fetchSatellites, fetchSatellitePositions, fetchSatelliteTrail } from "../lib/api";
+import { fetchSatellites } from "../lib/api";
+import * as satellite from "satellite.js";
 import { feature } from "topojson-client";
 import type { Topology } from "topojson-specification";
 
@@ -12,6 +13,13 @@ type Sat = {
   longitude: number;
   altitudeKm: number;
   type?: string;
+};
+
+/** A satellite with its parsed satrec for client-side SGP4 propagation */
+type SatTle = {
+  satelliteId: number;
+  name: string;
+  satrec: satellite.SatRec;
 };
 
 type GlobeInstance = {
@@ -52,6 +60,19 @@ type GlobeInstance = {
 
 const EARTH_RADIUS_KM = 6371;
 
+/** Propagate a satrec to geodetic lat/lng/alt at a given Date using satellite.js */
+function propagateToGeodetic(satrec: satellite.SatRec, date: Date): { lat: number; lng: number; alt: number } | null {
+  const posVel = satellite.propagate(satrec, date);
+  if (!posVel || !posVel.position || typeof posVel.position === "boolean") return null;
+  const gmst = satellite.gstime(date);
+  const geo = satellite.eciToGeodetic(posVel.position, gmst);
+  return {
+    lat: satellite.degreesLat(geo.latitude),
+    lng: satellite.degreesLong(geo.longitude),
+    alt: geo.height, // km above Earth surface
+  };
+}
+
 type SelectedSat = {
   satelliteId: number;
   name: string;
@@ -64,31 +85,6 @@ type OrbitPath = {
   color: string;
   points: { lat: number; lng: number; alt: number }[];
 };
-
-/** Convert ECI (km) + datetime → geodetic lat/lng/alt */
-function eciToGeodetic(x: number, y: number, z: number, datetime: string) {
-  const d = new Date(datetime);
-  const jd = d.getTime() / 86400000 + 2440587.5;
-  const T = (jd - 2451545.0) / 36525;
-  let gmst =
-    280.46061837 +
-    360.98564736629 * (jd - 2451545.0) +
-    0.000387933 * T * T -
-    (T * T * T) / 38710000;
-  gmst = ((gmst % 360) + 360) % 360;
-  const gmstRad = (gmst * Math.PI) / 180;
-
-  const xEcef = x * Math.cos(gmstRad) + y * Math.sin(gmstRad);
-  const yEcef = -x * Math.sin(gmstRad) + y * Math.cos(gmstRad);
-  const zEcef = z;
-
-  const lng = (Math.atan2(yEcef, xEcef) * 180) / Math.PI;
-  const lat =
-    (Math.atan2(zEcef, Math.sqrt(xEcef * xEcef + yEcef * yEcef)) * 180) /
-    Math.PI;
-  const alt = Math.sqrt(x * x + y * y + z * z) - EARTH_RADIUS_KM;
-  return { lat, lng, alt };
-}
 
 function generateStarfieldDataUrl(
   width = 2048,
@@ -136,12 +132,16 @@ export default function GlobeView() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [satellites, setSatellites] = useState<Sat[]>([]);
   const [satType, setSatType] = useState<string>("Internet");
-  const [satIds, setSatIds] = useState<{ id: number; name: string }[]>([]);
+  const [satCount, setSatCount] = useState(0);
   const [selectedSats, setSelectedSats] = useState<SelectedSat[]>([]);
   const [orbitPaths, setOrbitPaths] = useState<OrbitPath[]>([]);
   const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const selectedSatsRef = useRef<SelectedSat[]>([]);
   const orbitPathsRef = useRef<OrbitPath[]>([]);
+  const satTlesRef = useRef<SatTle[]>([]);
+
+  const MAX_SELECTED = 10;
 
   const SAT_TYPES = [
     "Internet",
@@ -201,7 +201,7 @@ export default function GlobeView() {
         .pointAltitude(0.01)
         // .pointAltitude((d: any) => d.altitudeRatio)  // original: beam height = orbit altitude
         .pointColor((d: any) => d.color)
-        .pointRadius(0.35)
+        .pointRadius(0.12)
         .pointLabel((d: any) => `${d.name} — ${Math.round(d.altitudeKm ?? 0)} km`)
         .onPointClick((point: any) => {
           if (!point?.satelliteId) return;
@@ -222,7 +222,13 @@ export default function GlobeView() {
             setOrbitPaths(nextPaths);
             return;
           }
-          // Select – fetch orbit trail
+          // Enforce max selection limit
+          if (selectedSatsRef.current.length >= MAX_SELECTED) {
+            setErrorMsg(`Maximum of ${MAX_SELECTED} satellites can be selected.`);
+            setTimeout(() => setErrorMsg(null), 3000);
+            return;
+          }
+          // Select – compute orbit trail client-side using SGP4
           const sat: SelectedSat = {
             satelliteId: point.satelliteId,
             name: point.name,
@@ -232,23 +238,28 @@ export default function GlobeView() {
           const nextSelected = [...selectedSatsRef.current, sat];
           selectedSatsRef.current = nextSelected;
           setSelectedSats(nextSelected);
-          fetchSatelliteTrail(point.satelliteId, 50)
-            .then((trail: any) => {
-              const pts = (trail.trail ?? []).map((tp: any) =>
-                eciToGeodetic(tp.x, tp.y, tp.z, tp.datetime)
-              );
-              const path: OrbitPath = {
-                satelliteId: point.satelliteId,
-                color: point.color,
-                points: pts,
-              };
-              const nextPaths = [...orbitPathsRef.current, path];
-              orbitPathsRef.current = nextPaths;
-              setOrbitPaths(nextPaths);
-            })
-            .catch((e: any) =>
-              console.error("Failed to load orbit trail", e)
-            );
+
+          // Find this satellite's satrec and propagate a full orbit trail (~90 min)
+          const satTle = satTlesRef.current.find((s) => s.satelliteId === point.satelliteId);
+          if (satTle) {
+            const now = new Date();
+            const TRAIL_MINUTES = 90;
+            const STEP_SECONDS = 30;
+            const pts: { lat: number; lng: number; alt: number }[] = [];
+            for (let offset = -TRAIL_MINUTES * 60; offset <= TRAIL_MINUTES * 60; offset += STEP_SECONDS) {
+              const t = new Date(now.getTime() + offset * 1000);
+              const geo = propagateToGeodetic(satTle.satrec, t);
+              if (geo) pts.push(geo);
+            }
+            const path: OrbitPath = {
+              satelliteId: point.satelliteId,
+              color: point.color,
+              points: pts,
+            };
+            const nextPaths = [...orbitPathsRef.current, path];
+            orbitPathsRef.current = nextPaths;
+            setOrbitPaths(nextPaths);
+          }
         })
         .pointsData([])
         .pathPoints("points")
@@ -296,102 +307,94 @@ export default function GlobeView() {
     return () => {};
   }, []);
 
-  // Fetch satellite list — paginate through ALL satellites when the type changes
+  // Fetch satellite TLEs once, then propagate positions client-side every second.
+  // No position API calls needed — all orbital math happens in the browser.
   useEffect(() => {
     let aborted = false;
+    let propagateTimer: number | null = null;
     setSatellites([]);
-    setSatIds([]);
+    setSatCount(0);
+    satTlesRef.current = [];
     setLoading(true);
     const opts = SAT_TYPE_OPTS[satType] ?? { search: satType };
     const PAGE_SIZE = 100;
-    const MAX_SATELLITES = 500; // cap to keep position updates fast
 
-    async function fetchAll() {
-      let allIds: { id: number; name: string }[] = [];
-      let page = 1;
-      let totalItems = Infinity;
-
-      while (allIds.length < totalItems && allIds.length < MAX_SATELLITES && !aborted) {
-        const resp = await fetchSatellites(page, PAGE_SIZE, opts);
-        if (aborted) return;
-        const sats = (resp.satellites ?? [])
-          .filter((x: any) => typeof x?.satelliteId === "number")
-          .map((x: any) => ({ id: x.satelliteId, name: x.name ?? String(x.satelliteId) }));
-        allIds = [...allIds, ...sats];
-        totalItems = resp.totalItems ?? allIds.length;
-        if (sats.length < PAGE_SIZE) break; // last page
-        page++;
+    /** Propagate all loaded TLEs to current time and update the globe */
+    function propagateAll(tles: SatTle[]) {
+      const now = new Date();
+      const SATELLITE_COLORS = ["#ff9800", "#ffeb3b", "#8bc34a", "#ff5722", "#ffc107", "#4caf50", "#ffa726"];
+      const sats: Sat[] = [];
+      for (let i = 0; i < tles.length; i++) {
+        const s = tles[i];
+        const geo = propagateToGeodetic(s.satrec, now);
+        if (geo) {
+          sats.push({
+            satelliteId: s.satelliteId,
+            name: s.name,
+            latitude: geo.lat,
+            longitude: geo.lng,
+            altitudeKm: geo.alt,
+          });
+        }
       }
-
+      // Assign colors outside the propagation loop for consistency
+      const points = sats.map((s, i) => ({
+        ...s,
+        altitudeRatio: Math.max(0, Math.min(0.5, (s.altitudeKm ?? 0) / EARTH_RADIUS_KM)),
+        color: SATELLITE_COLORS[i % SATELLITE_COLORS.length],
+      }));
       if (!aborted) {
-        setSatIds(allIds.slice(0, MAX_SATELLITES));
+        setSatellites(sats);
+        setLastUpdated(now.toLocaleTimeString());
+        if (globeRef.current) globeRef.current.pointsData(points);
       }
     }
 
-    fetchAll().catch((e) => console.error("Failed to load satellite list", e));
-    return () => { aborted = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [satType]);
+    async function fetchTles() {
+      let allTles: SatTle[] = [];
+      let page = 1;
+      let totalItems = Infinity;
 
-  // Poll positions using the fetched IDs — chunks of 200, adaptive poll rate
-  useEffect(() => {
-    if (satIds.length === 0) return;
-    let timer: number | null = null;
-    let aborted = false;
-    const ids = satIds.map((s) => s.id);
-    const nameMap = Object.fromEntries(satIds.map((s) => [s.id, s.name]));
-    const CHUNK_SIZE = 200;
-    // Adaptive poll: more satellites → slower poll to avoid overloading
-    const pollInterval = ids.length > 200 ? 15000 : ids.length > 50 ? 10000 : 5000;
-
-    const tick = async () => {
-      try {
-        // Chunk IDs into batches
-        const chunks: number[][] = [];
-        for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
-          chunks.push(ids.slice(i, i + CHUNK_SIZE));
-        }
-        const results = await Promise.all(
-          chunks.map((chunk) => fetchSatellitePositions(chunk))
-        );
+      while (allTles.length < totalItems && !aborted) {
+        const resp = await fetchSatellites(page, PAGE_SIZE, opts);
         if (aborted) return;
-        const allData = results.flat();
-        const sats: Sat[] = (allData ?? [])
-          .filter((x: any) => typeof x?.satelliteId === "number")
-          .map((x: any) => ({
-            satelliteId: x.satelliteId,
-            name: x.name ?? nameMap[x.satelliteId] ?? String(x.satelliteId),
-            latitude: x.latitude,
-            longitude: x.longitude,
-            altitudeKm: x.altitudeKm,
-          }));
-        setSatellites(sats);
-        setLoading(false);
-        setLastUpdated(new Date().toLocaleTimeString());
-      } catch (e) {
-        console.error("satellite position update failed", e);
-      } finally {
-        if (!aborted) timer = window.setTimeout(tick, pollInterval);
-      }
-    };
+        const pageTles: SatTle[] = (resp.satellites ?? [])
+          .filter((x: any) => x?.satelliteId && x?.line1 && x?.line2)
+          .map((x: any) => {
+            const satrec = satellite.twoline2satrec(x.line1, x.line2);
+            return { satelliteId: x.satelliteId, name: x.name ?? String(x.satelliteId), satrec };
+          })
+          .filter((s: SatTle) => s.satrec);
+        allTles = [...allTles, ...pageTles];
+        satTlesRef.current = allTles;
+        totalItems = resp.totalItems ?? allTles.length;
+        setSatCount(totalItems);
 
-    tick();
+        // Propagate and render immediately after each page so dots appear progressively
+        propagateAll(allTles);
+        setLoading(false);
+
+        if ((resp.satellites ?? []).length < PAGE_SIZE) break;
+        page++;
+      }
+
+      // Start 1-second propagation loop — pure math, no network calls
+      if (!aborted && allTles.length > 0) {
+        const tick = () => {
+          propagateAll(satTlesRef.current);
+          if (!aborted) propagateTimer = window.setTimeout(tick, 1000);
+        };
+        propagateTimer = window.setTimeout(tick, 1000);
+      }
+    }
+
+    fetchTles().catch((e) => console.error("Failed to load satellites", e));
     return () => {
       aborted = true;
-      if (timer) window.clearTimeout(timer);
+      if (propagateTimer) window.clearTimeout(propagateTimer);
     };
-  }, [satIds]);
-
-  useEffect(() => {
-    if (!globeRef.current) return;
-    const SATELLITE_COLORS = ["#ff9800", "#ffeb3b", "#8bc34a", "#ff5722", "#ffc107", "#4caf50", "#ffa726"];
-    const points = satellites.map((s, i) => ({
-      ...s,
-      altitudeRatio: Math.max(0, Math.min(0.5, (s.altitudeKm ?? 0) / EARTH_RADIUS_KM)),
-      color: SATELLITE_COLORS[i % SATELLITE_COLORS.length],
-    }));
-    globeRef.current.pointsData(points);
-  }, [satellites]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [satType]);
 
   // Sync orbit paths to globe
   useEffect(() => {
@@ -448,15 +451,80 @@ export default function GlobeView() {
             ))}
           </select>
         </div>
-        <div>Satellites: {satellites.length}{satIds.length > 0 && satellites.length < satIds.length ? ` / ${satIds.length}` : ""}</div>
+        <div>Satellites: {satellites.length}{satCount > 0 && satellites.length < satCount ? ` / ${satCount}` : ""}</div>
         <div>Update: {lastUpdated ?? "--"}</div>
         {loading && (
           <div style={{ marginTop: 6, color: "#4fc3f7" }}>
-            Loading satellite positions...
+            Loading satellite TLEs...
           </div>
         )}
         <div style={{ marginTop: 6, color: "rgba(255,255,255,0.75)" }}>
           Tip: click a satellite dot to show its orbit path.
+        </div>
+      </div>
+
+      {/* Navbar */}
+      <div
+        style={{
+          position: "absolute",
+          top: 12,
+          left: "50%",
+          transform: "translateX(-50%)",
+          padding: "8px 20px",
+          borderRadius: 10,
+          background: "rgba(0,0,0,0.55)",
+          border: "1px solid rgba(255,255,255,0.12)",
+          color: "white",
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          fontSize: 13,
+          display: "flex",
+          alignItems: "center",
+          gap: 24,
+          zIndex: 10,
+          whiteSpace: "nowrap",
+        }}
+      >
+        <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: 2 }}>LUNE</span>
+        <div
+          style={{
+            width: 1,
+            height: 18,
+            background: "rgba(255,255,255,0.2)",
+          }}
+        />
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            style={{
+              background: "rgba(255,255,255,0.12)",
+              border: "1px solid rgba(255,255,255,0.25)",
+              color: "#fff",
+              padding: "4px 12px",
+              borderRadius: 6,
+              fontSize: 12,
+              cursor: "default",
+              fontFamily: "inherit",
+            }}
+          >
+            Satellite Tracker
+          </button>
+          {["Constellations", "News", "Trips"].map((label) => (
+            <button
+              key={label}
+              disabled
+              style={{
+                background: "transparent",
+                border: "1px solid rgba(255,255,255,0.08)",
+                color: "rgba(255,255,255,0.3)",
+                padding: "4px 12px",
+                borderRadius: 6,
+                fontSize: 12,
+                cursor: "not-allowed",
+                fontFamily: "inherit",
+              }}
+            >
+              {label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -528,15 +596,45 @@ export default function GlobeView() {
           <div
             style={{
               marginTop: 6,
-              textAlign: "right",
-              color: "rgba(255,255,255,0.4)",
-              cursor: "pointer",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
               fontSize: 11,
             }}
-            onClick={clearAll}
           >
-            clear {selectedSats.length}
+            <span style={{ color: "rgba(255,255,255,0.3)" }}>max {MAX_SELECTED}</span>
+            <span
+              style={{
+                color: "rgba(255,255,255,0.4)",
+                cursor: "pointer",
+              }}
+              onClick={clearAll}
+            >
+              clear all
+            </span>
           </div>
+        </div>
+      )}
+
+      {/* Error toast – bottom right */}
+      {errorMsg && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: 20,
+            right: 20,
+            padding: "10px 16px",
+            borderRadius: 8,
+            background: "rgba(180, 40, 40, 0.9)",
+            border: "1px solid rgba(255,100,100,0.4)",
+            color: "#fff",
+            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+            fontSize: 12,
+            zIndex: 20,
+            pointerEvents: "none",
+          }}
+        >
+          {errorMsg}
         </div>
       )}
     </div>
