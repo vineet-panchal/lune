@@ -8,7 +8,7 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -39,12 +39,30 @@ public class CelestrakApiClient {
         }
         URI uri = UriComponentsBuilder.fromUriString(BASE_URL)
                 .queryParam("GROUP", group.toUpperCase())
-                .queryParam("FORMAT", "json")
+                .queryParam("FORMAT", "3le")
                 .build()
                 .toUri();
         try {
-            CelestrakSatelliteDto[] arr = restTemplate.getForObject(uri, CelestrakSatelliteDto[].class);
-            List<CelestrakSatelliteDto> result = arr != null ? Arrays.asList(arr) : List.of();
+            String body = restTemplate.getForObject(uri, String.class);
+            if (body == null || body.isBlank()) return List.of();
+            String[] lines = body.strip().split("\\r?\\n");
+            List<CelestrakSatelliteDto> result = new ArrayList<>();
+            for (int i = 0; i + 2 < lines.length; i += 3) {
+                String nameLine = lines[i].trim();
+                String l1 = lines[i + 1].trim();
+                String l2 = lines[i + 2].trim();
+                if (!l1.startsWith("1 ") || !l2.startsWith("2 ")) continue;
+                CelestrakSatelliteDto dto = new CelestrakSatelliteDto();
+                dto.setName(nameLine.startsWith("0 ") ? nameLine.substring(2).trim() : nameLine);
+                dto.setLine1(l1);
+                dto.setLine2(l2);
+                try {
+                    dto.setNoradCatId(Integer.parseInt(l1.substring(2, 7).trim()));
+                } catch (NumberFormatException e) {
+                    continue;
+                }
+                result.add(dto);
+            }
             groupCache.put(key, new CachedGroup(result, System.currentTimeMillis()));
             return result;
         } catch (Exception e) {
