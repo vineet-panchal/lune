@@ -161,20 +161,16 @@ export default function GlobeView() {
   const MAX_SELECTED = 10;
 
   const SAT_TYPES = [
-    "Internet",
     "Popular",
-    "Stations",
-    "Starlink",
-    "OneWeb",
-    "GPS",
-    "GLONASS",
-    "Galileo",
-    "BeiDou",
+    "Internet",
     "Communications",
+    "Stations",
     "Geostationary",
-    "Weather",
+    "GPS",
     "Earth Imaging",
-    "Amateur",
+    "Weather",
+    "Science",
+    "IoT",
   ];
 
   // Maps display label → backend params (type = CelesTrak group name, group = curated list)
@@ -193,6 +189,21 @@ export default function GlobeView() {
     "Weather":       { type: "NOAA" },
     "Earth Imaging": { type: "RESOURCE" },
     "Amateur":       { type: "AMATEUR" },
+    "Science":       { type: "SCIENCE" },
+    "IoT":           { type: "IOT" },
+  };
+
+  const SAT_TYPE_DESCRIPTIONS: Record<string, string> = {
+    "Popular":        "Viewing the most well-known satellites and space objects, including the International Space Station.",
+    "Internet":       "Viewing internet satellite constellations providing global broadband coverage.",
+    "Communications": "Viewing communications satellites used for TV, radio, and data relay.",
+    "Stations":       "Viewing crewed space stations currently orbiting Earth.",
+    "Geostationary":  "Viewing satellites in geostationary orbit, fixed above one point on the equator.",
+    "GPS":            "Viewing GPS navigation satellites used for global positioning.",
+    "Earth Imaging":  "Viewing Earth observation satellites capturing imagery of our planet.",
+    "Weather":        "Viewing weather satellites monitoring atmospheric and climate conditions.",
+    "Science":        "Viewing scientific research satellites studying Earth and space.",
+    "IoT":            "Viewing satellites supporting Internet-of-Things device connectivity.",
   };
 
   useEffect(() => {
@@ -463,6 +474,11 @@ export default function GlobeView() {
             ))}
           </select>
         </div>
+        {SAT_TYPE_DESCRIPTIONS[satType] && (
+          <div style={{ marginBottom: 8, color: "rgba(255,255,255,0.6)", fontStyle: "italic", lineHeight: 1.4 }}>
+            {SAT_TYPE_DESCRIPTIONS[satType]}
+          </div>
+        )}
         <div>Satellites: {satellites.length}{satCount > 0 && satellites.length < satCount ? ` / ${satCount}` : ""}</div>
         <div>Update: {lastUpdated ?? "--"}</div>
         {loading && (
