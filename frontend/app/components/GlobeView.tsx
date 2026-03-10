@@ -158,6 +158,13 @@ export default function GlobeView() {
   const orbitPathsRef = useRef<OrbitPath[]>([]);
   const satTlesRef = useRef<SatTle[]>([]);
 
+  const [activePanel, setActivePanel] = useState<"search" | "filter">("filter");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchSuggestions, setSearchSuggestions] = useState<any[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const searchPropTimerRef = useRef<number | null>(null);
+  const searchJustSelectedRef = useRef(false);
+
   const MAX_SELECTED = 10;
 
   const SAT_TYPES = [
@@ -189,8 +196,6 @@ export default function GlobeView() {
     "Weather":       { type: "NOAA" },
     "Earth Imaging": { type: "RESOURCE" },
     "Amateur":       { type: "AMATEUR" },
-    "Science":       { type: "SCIENCE" },
-    "IoT":           { type: "IOT" },
   };
 
   const SAT_TYPE_DESCRIPTIONS: Record<string, string> = {
@@ -341,6 +346,24 @@ export default function GlobeView() {
     setSatellites([]);
     setSatCount(0);
     satTlesRef.current = [];
+    selectedSatsRef.current = [];
+    orbitPathsRef.current = [];
+    setSelectedSats([]);
+    setOrbitPaths([]);
+
+    // Clean up any search propagation timer
+    if (searchPropTimerRef.current) {
+      clearTimeout(searchPropTimerRef.current);
+      searchPropTimerRef.current = null;
+    }
+
+    // In search mode, clear the globe and don't fetch by type
+    if (activePanel === "search") {
+      setLoading(false);
+      if (globeRef.current) globeRef.current.pointsData([]);
+      return () => { aborted = true; };
+    }
+
     setLoading(true);
     const opts = SAT_TYPE_OPTS[satType] ?? { search: satType };
     const PAGE_SIZE = 100;
@@ -417,7 +440,39 @@ export default function GlobeView() {
       if (propagateTimer) window.clearTimeout(propagateTimer);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [satType]);
+  }, [satType, activePanel]);
+
+  // Search autocomplete — debounced API call
+  useEffect(() => {
+    if (activePanel !== "search" || searchQuery.trim().length < 2) {
+      setSearchSuggestions([]);
+      return;
+    }
+    if (searchJustSelectedRef.current) {
+      searchJustSelectedRef.current = false;
+      return;
+    }
+    const timer = setTimeout(async () => {
+      setSearchLoading(true);
+      try {
+        const resp = await fetchSatellites(1, 20, { search: searchQuery.trim() });
+        const sats = (resp.satellites ?? []).filter((s: any) => s?.satelliteId && s?.line1 && s?.line2);
+        setSearchSuggestions(sats);
+      } catch (e) {
+        console.error("Search failed", e);
+        setSearchSuggestions([]);
+      }
+      setSearchLoading(false);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [activePanel, searchQuery]);
+
+  // Cleanup search propagation on unmount
+  useEffect(() => {
+    return () => {
+      if (searchPropTimerRef.current) clearTimeout(searchPropTimerRef.current);
+    };
+  }, []);
 
   // Sync orbit paths to globe
   useEffect(() => {
@@ -441,6 +496,40 @@ export default function GlobeView() {
     setOrbitPaths([]);
   }, []);
 
+  const handleSearchSelect = useCallback((sat: any) => {
+    const satrec = satellite.twoline2satrec(sat.line1, sat.line2);
+    if (!satrec) return;
+    satTlesRef.current = [{ satelliteId: sat.satelliteId, name: sat.name, satrec }];
+    setSatCount(1);
+    searchJustSelectedRef.current = true;
+    setSearchQuery(sat.name);
+    setSearchSuggestions([]);
+
+    // Clear any existing search propagation timer
+    if (searchPropTimerRef.current) {
+      clearTimeout(searchPropTimerRef.current);
+      searchPropTimerRef.current = null;
+    }
+
+    // Start propagation loop for the selected satellite
+    const tick = () => {
+      const tles = satTlesRef.current;
+      if (tles.length === 0) return;
+      const now = new Date();
+      const sats: Sat[] = [];
+      for (const s of tles) {
+        const geo = propagateToGeodetic(s.satrec, now);
+        if (geo) sats.push({ satelliteId: s.satelliteId, name: s.name, latitude: geo.lat, longitude: geo.lng, altitudeKm: geo.alt });
+      }
+      const points = sats.map(s => ({ ...s, color: altitudeToColor(s.altitudeKm) }));
+      setSatellites(sats);
+      setLastUpdated(now.toLocaleTimeString());
+      if (globeRef.current) globeRef.current.pointsData(points);
+      searchPropTimerRef.current = window.setTimeout(tick, 1000);
+    };
+    tick();
+  }, []);
+
   return (
     <div style={{ position: "relative", width: "100vw", height: "100vh" }}>
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
@@ -460,25 +549,148 @@ export default function GlobeView() {
           maxWidth: 360,
         }}
       >
-        <div style={{ fontWeight: 700, marginBottom: 6 }}>Lune Globe</div>
-        <div style={{ marginBottom: 8 }}>
-          <label htmlFor="sat-type-select" style={{ marginRight: 8 }}>Type:</label>
-          <select
-            id="sat-type-select"
-            value={satType}
-            onChange={e => setSatType(e.target.value)}
-            style={{ fontSize: 13, padding: "2px 8px", borderRadius: 6, background: "#222", color: "#fff" }}
+        <div style={{ fontWeight: 700, marginBottom: 10 }}>Lune Globe</div>
+
+        {/* Search A Satellite dropdown */}
+        <div style={{ marginBottom: 4 }}>
+          <div
+            onClick={() => {
+              if (activePanel !== "search") {
+                setActivePanel("search");
+                setSearchQuery("");
+                setSearchSuggestions([]);
+              }
+            }}
+            style={{
+              cursor: "pointer",
+              padding: "6px 8px",
+              borderRadius: 6,
+              background: activePanel === "search" ? "rgba(255,255,255,0.1)" : "transparent",
+              border: "1px solid rgba(255,255,255,0.15)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              userSelect: "none",
+            }}
           >
-            {SAT_TYPES.map(type => (
-              <option key={type} value={type}>{type}</option>
-            ))}
-          </select>
-        </div>
-        {SAT_TYPE_DESCRIPTIONS[satType] && (
-          <div style={{ marginBottom: 8, color: "rgba(255,255,255,0.6)", fontStyle: "italic", lineHeight: 1.4 }}>
-            {SAT_TYPE_DESCRIPTIONS[satType]}
+            <span style={{ fontWeight: 600 }}>Search A Satellite</span>
+            <span style={{ fontSize: 10, opacity: 0.6 }}>{activePanel === "search" ? "▾" : "▸"}</span>
           </div>
-        )}
+          {activePanel === "search" && (
+            <div style={{ padding: "8px 4px 4px" }}>
+              <div style={{ marginBottom: 6, color: "rgba(255,255,255,0.6)", fontStyle: "italic", fontSize: 11 }}>
+                Search for a satellite, given their name
+              </div>
+              <div style={{ position: "relative" }}>
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="e.g. INTELSAT, ISS..."
+                  style={{
+                    width: "100%",
+                    padding: "6px 8px",
+                    borderRadius: 6,
+                    border: "1px solid rgba(255,255,255,0.2)",
+                    background: "#181818",
+                    color: "#fff",
+                    fontSize: 12,
+                    fontFamily: "inherit",
+                    outline: "none",
+                    boxSizing: "border-box",
+                  }}
+                />
+                {searchLoading && (
+                  <div style={{ marginTop: 4, color: "#4fc3f7", fontSize: 11 }}>Searching...</div>
+                )}
+                {searchSuggestions.length > 0 && (
+                  <div
+                    style={{
+                      marginTop: 4,
+                      maxHeight: 180,
+                      overflowY: "auto",
+                      borderRadius: 6,
+                      border: "1px solid rgba(255,255,255,0.15)",
+                      background: "rgba(20,20,30,0.95)",
+                    }}
+                  >
+                    {searchSuggestions.map((s: any) => (
+                      <div
+                        key={s.satelliteId}
+                        onClick={() => handleSearchSelect(s)}
+                        style={{
+                          padding: "5px 8px",
+                          cursor: "pointer",
+                          fontSize: 11,
+                          borderBottom: "1px solid rgba(255,255,255,0.06)",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                        onMouseEnter={(e) => {
+                          (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.1)";
+                        }}
+                        onMouseLeave={(e) => {
+                          (e.currentTarget as HTMLElement).style.background = "transparent";
+                        }}
+                      >
+                        {s.name}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Filter By Type dropdown */}
+        <div style={{ marginBottom: 8 }}>
+          <div
+            onClick={() => {
+              if (activePanel !== "filter") {
+                setActivePanel("filter");
+              }
+            }}
+            style={{
+              cursor: "pointer",
+              padding: "6px 8px",
+              borderRadius: 6,
+              background: activePanel === "filter" ? "rgba(255,255,255,0.1)" : "transparent",
+              border: "1px solid rgba(255,255,255,0.15)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              userSelect: "none",
+            }}
+          >
+            <span style={{ fontWeight: 600 }}>Filter By Type</span>
+            <span style={{ fontSize: 10, opacity: 0.6 }}>{activePanel === "filter" ? "▾" : "▸"}</span>
+          </div>
+          {activePanel === "filter" && (
+            <div style={{ padding: "8px 4px 4px" }}>
+              <div style={{ marginBottom: 6 }}>
+                <label htmlFor="sat-type-select" style={{ marginRight: 8 }}>Type:</label>
+                <select
+                  id="sat-type-select"
+                  value={satType}
+                  onChange={e => setSatType(e.target.value)}
+                  style={{ fontSize: 13, padding: "2px 8px", borderRadius: 6, background: "#222", color: "#fff" }}
+                >
+                  {SAT_TYPES.map(type => (
+                    <option key={type} value={type}>{type}</option>
+                  ))}
+                </select>
+              </div>
+              {SAT_TYPE_DESCRIPTIONS[satType] && (
+                <div style={{ marginBottom: 4, color: "rgba(255,255,255,0.6)", fontStyle: "italic", lineHeight: 1.4, fontSize: 11 }}>
+                  {SAT_TYPE_DESCRIPTIONS[satType]}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
         <div>Satellites: {satellites.length}{satCount > 0 && satellites.length < satCount ? ` / ${satCount}` : ""}</div>
         <div>Update: {lastUpdated ?? "--"}</div>
         {loading && (
