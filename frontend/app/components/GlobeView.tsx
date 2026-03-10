@@ -60,6 +60,23 @@ type GlobeInstance = {
 
 const EARTH_RADIUS_KM = 6371;
 
+/** Altitude bands (km) and their assigned colours */
+const ALTITUDE_BANDS: { name: string; range: string; min: number; max: number; color: string }[] = [
+  { name: "Very Low Earth Orbit (VLEO)", range: "0–400 km",           min: 0,      max: 400,      color: "#00e5ff" },
+  { name: "Low Earth Orbit (LEO)",       range: "400–1,000 km",       min: 400,    max: 1000,     color: "#76ff03" },
+  { name: "Medium Earth Orbit (MEO)",    range: "1,000–2,000 km",     min: 1000,   max: 2000,     color: "#ffeb3b" },
+  { name: "High Earth Orbit (HEO)",      range: "2,000–35,786 km",    min: 2000,   max: 35786,    color: "#ff9800" },
+  { name: "Geostationary (GEO)",         range: "35,786–35,888 km",   min: 35786,  max: 35888,    color: "#f44336" },
+  { name: "Beyond GEO",                  range: "35,888–100,000 km",  min: 35888,  max: Infinity, color: "#e040fb" },
+];
+
+function altitudeToColor(altKm: number): string {
+  for (const band of ALTITUDE_BANDS) {
+    if (altKm < band.max) return band.color;
+  }
+  return ALTITUDE_BANDS[ALTITUDE_BANDS.length - 1].color;
+}
+
 /** Propagate a satrec to geodetic lat/lng/alt at a given Date using satellite.js */
 function propagateToGeodetic(satrec: satellite.SatRec, date: Date): { lat: number; lng: number; alt: number } | null {
   const posVel = satellite.propagate(satrec, date);
@@ -131,7 +148,7 @@ export default function GlobeView() {
   const globeRef = useRef<GlobeInstance | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [satellites, setSatellites] = useState<Sat[]>([]);
-  const [satType, setSatType] = useState<string>("Internet");
+  const [satType, setSatType] = useState<string>("Popular");
   const [satCount, setSatCount] = useState(0);
   const [selectedSats, setSelectedSats] = useState<SelectedSat[]>([]);
   const [orbitPaths, setOrbitPaths] = useState<OrbitPath[]>([]);
@@ -197,9 +214,7 @@ export default function GlobeView() {
         .showGraticules(true)
         .pointLat("latitude")
         .pointLng("longitude")
-        // Use a small fixed altitude so satellites render as dots, not vertical beams
-        .pointAltitude(0.01)
-        // .pointAltitude((d: any) => d.altitudeRatio)  // original: beam height = orbit altitude
+        .pointAltitude(0)
         .pointColor((d: any) => d.color)
         .pointRadius(0.12)
         .pointLabel((d: any) => `${d.name} — ${Math.round(d.altitudeKm ?? 0)} km`)
@@ -322,7 +337,6 @@ export default function GlobeView() {
     /** Propagate all loaded TLEs to current time and update the globe */
     function propagateAll(tles: SatTle[]) {
       const now = new Date();
-      const SATELLITE_COLORS = ["#ff9800", "#ffeb3b", "#8bc34a", "#ff5722", "#ffc107", "#4caf50", "#ffa726"];
       const sats: Sat[] = [];
       for (let i = 0; i < tles.length; i++) {
         const s = tles[i];
@@ -337,11 +351,9 @@ export default function GlobeView() {
           });
         }
       }
-      // Assign colors outside the propagation loop for consistency
-      const points = sats.map((s, i) => ({
+      const points = sats.map((s) => ({
         ...s,
-        altitudeRatio: Math.max(0, Math.min(0.5, (s.altitudeKm ?? 0) / EARTH_RADIUS_KM)),
-        color: SATELLITE_COLORS[i % SATELLITE_COLORS.length],
+        color: altitudeToColor(s.altitudeKm ?? 0),
       }));
       if (!aborted) {
         setSatellites(sats);
@@ -616,13 +628,74 @@ export default function GlobeView() {
         </div>
       )}
 
-      {/* Error toast – bottom right */}
+      {/* Altitude legend – bottom right */}
+      <div
+        style={{
+          position: "absolute",
+          bottom: 16,
+          right: 16,
+          padding: "14px 16px",
+          borderRadius: 12,
+          background: "rgba(10,10,14,0.82)",
+          border: "1px solid rgba(255,255,255,0.10)",
+          color: "white",
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          fontSize: 11,
+          zIndex: 10,
+          minWidth: 210,
+        }}
+      >
+        <div style={{ fontWeight: 700, fontSize: 13, textAlign: "center", marginBottom: 10, letterSpacing: 0.3 }}>
+          Orbital Altitude
+        </div>
+        <div style={{ borderTop: "1px solid rgba(255,255,255,0.10)", margin: "0 -16px 10px", padding: 0 }} />
+        {ALTITUDE_BANDS.map((band) => (
+          <div key={band.name} style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 8 }}>
+            <span
+              style={{
+                width: 14,
+                height: 14,
+                borderRadius: 3,
+                background: band.color,
+                flexShrink: 0,
+                marginTop: 1,
+              }}
+            />
+            <div style={{ lineHeight: 1.35 }}>
+              <div style={{ fontWeight: 600, fontSize: 11 }}>{band.name}</div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)" }}>{band.range}</div>
+            </div>
+          </div>
+        ))}
+        <div style={{ borderTop: "1px solid rgba(255,255,255,0.10)", margin: "6px -16px 8px", padding: 0 }} />
+        <div style={{ fontSize: 10, color: "rgba(255,255,255,0.6)", marginBottom: 4, fontWeight: 600 }}>
+          Distribution ({satellites.length}{satCount > 0 && satellites.length < satCount ? `/${satCount}` : ""} satellites)
+        </div>
+        {(() => {
+          const counts: Record<string, number> = {};
+          for (const band of ALTITUDE_BANDS) counts[band.name] = 0;
+          for (const s of satellites) {
+            for (const band of ALTITUDE_BANDS) {
+              if (s.altitudeKm < band.max) { counts[band.name]++; break; }
+            }
+          }
+          const total = satellites.length || 1;
+          return ALTITUDE_BANDS.filter((band) => counts[band.name] > 0).map((band) => (
+            <div key={band.name} style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "rgba(255,255,255,0.5)", lineHeight: 1.7 }}>
+              <span>{band.name.replace(/ \(.*\)/, "")}</span>
+              <span style={{ marginLeft: 12, whiteSpace: "nowrap" }}>{counts[band.name]} ({(counts[band.name] / total * 100).toFixed(1)}%)</span>
+            </div>
+          ));
+        })()}
+      </div>
+
+      {/* Error toast – bottom left */}
       {errorMsg && (
         <div
           style={{
             position: "absolute",
             bottom: 20,
-            right: 20,
+            left: 20,
             padding: "10px 16px",
             borderRadius: 8,
             background: "rgba(180, 40, 40, 0.9)",
