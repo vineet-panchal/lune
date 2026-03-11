@@ -17,4 +17,6 @@ public class SatelliteListResponseDto {
     private int totalItems;
     private int page;
     private int pageSize;
+    /** Where the data was fetched from: "celestrak", "tle-api", or "cache" */
+    private String dataSource;
 }
