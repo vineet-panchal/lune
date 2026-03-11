@@ -133,6 +133,7 @@ public class SatelliteService {
                     .totalItems(total)
                     .page(page)
                     .pageSize(pageSize)
+                    .dataSource("celestrak")
                     .build();
         }
 
@@ -167,6 +168,7 @@ public class SatelliteService {
                         .totalItems(total)
                         .page(page)
                         .pageSize(pageSize)
+                        .dataSource("celestrak")
                         .build();
             }
             // CelesTrak unreachable/empty — fall through to TLE API search
@@ -201,6 +203,7 @@ public class SatelliteService {
                         .totalItems(fallback.getTotalItems() != null ? fallback.getTotalItems() : items.size())
                         .page(page)
                         .pageSize(pageSize)
+                        .dataSource("tle-api")
                         .build();
             }
         }
@@ -213,6 +216,7 @@ public class SatelliteService {
                     .totalItems(0)
                     .page(page)
                     .pageSize(pageSize)
+                    .dataSource("tle-api")
                     .build();
         }
         List<SatelliteListItemDto> items = raw.getMember().stream()
@@ -230,6 +234,7 @@ public class SatelliteService {
                 .totalItems(items.size())
                 .page(raw.getParameters() != null && raw.getParameters().getPage() != null ? raw.getParameters().getPage() : page)
                 .pageSize(raw.getParameters() != null && raw.getParameters().getPageSize() != null ? raw.getParameters().getPageSize() : pageSize)
+                .dataSource("tle-api")
                 .build();
     }
 

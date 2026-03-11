@@ -149,11 +149,13 @@ export default function GlobeView() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [satellites, setSatellites] = useState<Sat[]>([]);
   const [satType, setSatType] = useState<string>("Popular");
+  const [satCompany, setSatCompany] = useState<string>("All");
   const [satCount, setSatCount] = useState(0);
   const [selectedSats, setSelectedSats] = useState<SelectedSat[]>([]);
   const [orbitPaths, setOrbitPaths] = useState<OrbitPath[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [dataSource, setDataSource] = useState<string | null>(null);
   const selectedSatsRef = useRef<SelectedSat[]>([]);
   const orbitPathsRef = useRef<OrbitPath[]>([]);
   const satTlesRef = useRef<SatTle[]>([]);
@@ -173,7 +175,7 @@ export default function GlobeView() {
     "Communications",
     "Stations",
     "Geostationary",
-    "GPS",
+    "Positioning",
     "Earth Imaging",
     "Weather",
     "Science",
@@ -187,7 +189,7 @@ export default function GlobeView() {
     "Stations":      { type: "STATIONS" },
     "Starlink":      { type: "STARLINK" },
     "OneWeb":        { type: "ONEWEB" },
-    "GPS":           { type: "GPS-OPS" },
+    "Positioning":   { type: "GPS-OPS" },
     "GLONASS":       { type: "GLO-OPS" },
     "Galileo":       { type: "GALILEO" },
     "BeiDou":        { type: "BEIDOU" },
@@ -204,11 +206,77 @@ export default function GlobeView() {
     "Communications": "Viewing communications satellites used for TV, radio, and data relay.",
     "Stations":       "Viewing crewed space stations currently orbiting Earth.",
     "Geostationary":  "Viewing satellites in geostationary orbit, fixed above one point on the equator.",
-    "GPS":            "Viewing GPS navigation satellites used for global positioning.",
+    "Positioning":    "Viewing navigation satellites from multiple global positioning systems.",
     "Earth Imaging":  "Viewing Earth observation satellites capturing imagery of our planet.",
     "Weather":        "Viewing weather satellites monitoring atmospheric and climate conditions.",
     "Science":        "Viewing scientific research satellites studying Earth and space.",
     "IoT":            "Viewing satellites supporting Internet-of-Things device connectivity.",
+  };
+
+  const COMPANY_OPTIONS: Record<string, string[]> = {
+    "Popular":        ["All"],
+    "Internet":       ["All", "Starlink", "LEO (Kuiper)", "OneWeb", "Qianfan", "Guowang", "GalaxySpace", "E-Space"],
+    "Communications": ["All", "Iridium NEXT", "GlobalStar", "Bluewalker", "Lynk"],
+    "Stations":       ["All"],
+    "Geostationary":  ["All"],
+    "Positioning":    ["All", "GPS", "Galileo", "GLONASS", "BeiDou"],
+    "Earth Imaging":  ["All", "Planet", "Jilin-1", "Satelog"],
+    "Weather":        ["All", "Spire"],
+    "Science":        ["All", "Swarm"],
+    "IoT":            ["All", "Orbcomm", "Geespace", "Tianqi"],
+  };
+
+  const COMPANY_API_OPTS: Record<string, { type?: string; group?: string; search?: string }> = {
+    "Starlink":       { type: "STARLINK" },
+    "LEO (Kuiper)":   { search: "KUIPER" },
+    "OneWeb":         { type: "ONEWEB" },
+    "Qianfan":        { search: "QIANFAN" },
+    "Guowang":        { search: "GUOWANG" },
+    "GalaxySpace":    { search: "GALAXYSPACE" },
+    "E-Space":        { search: "E-SPACE" },
+    "Iridium NEXT":   { type: "IRIDIUM-NEXT" },
+    "GlobalStar":     { type: "GLOBALSTAR" },
+    "Bluewalker":     { search: "BLUEWALKER" },
+    "Lynk":           { search: "LYNK" },
+    "GPS":            { type: "GPS-OPS" },
+    "Galileo":        { type: "GALILEO" },
+    "GLONASS":        { type: "GLO-OPS" },
+    "BeiDou":         { type: "BEIDOU" },
+    "Planet":         { search: "PLANET" },
+    "Jilin-1":        { search: "JILIN" },
+    "Satelog":        { search: "SATELOG" },
+    "Spire":          { search: "SPIRE" },
+    "Swarm":          { search: "SWARM" },
+    "Orbcomm":        { type: "ORBCOMM" },
+    "Geespace":       { search: "GEESPACE" },
+    "Tianqi":         { search: "TIANQI" },
+  };
+
+  const COMPANY_DESCRIPTIONS: Record<string, string> = {
+    "All":            "Viewing all satellites in this category.",
+    "Starlink":       "SpaceX's Starlink constellation providing global broadband internet.",
+    "LEO (Kuiper)":   "Amazon's Project Kuiper low Earth orbit broadband constellation.",
+    "OneWeb":         "OneWeb's LEO constellation for global internet connectivity.",
+    "Qianfan":        "China's Qianfan (Thousand Sails) broadband mega-constellation.",
+    "Guowang":        "China's Guowang (SatNet) broadband satellite constellation.",
+    "GalaxySpace":    "GalaxySpace's LEO broadband internet constellation.",
+    "E-Space":        "E-Space's sustainable LEO communications constellation.",
+    "Iridium NEXT":   "Iridium's next-generation global satellite communications network.",
+    "GlobalStar":     "Globalstar's LEO satellite constellation for voice and data.",
+    "Bluewalker":     "AST SpaceMobile's Bluewalker direct-to-cell satellite network.",
+    "Lynk":           "Lynk Global's cell-tower-in-space satellite network.",
+    "GPS":            "U.S. Global Positioning System navigation satellites.",
+    "Galileo":        "European Union's Galileo global navigation satellite system.",
+    "GLONASS":        "Russia's GLONASS global navigation satellite system.",
+    "BeiDou":         "China's BeiDou navigation satellite system.",
+    "Planet":         "Planet Labs' Earth observation satellite constellation.",
+    "Jilin-1":        "China's Jilin-1 commercial Earth observation satellites.",
+    "Satelog":        "Satelog Earth observation and remote sensing satellites.",
+    "Spire":          "Spire Global's weather and maritime tracking satellite constellation.",
+    "Swarm":          "Swarm Technologies' low-cost IoT and scientific data satellites.",
+    "Orbcomm":        "Orbcomm's machine-to-machine IoT satellite communication network.",
+    "Geespace":       "Geely's Geespace LEO satellite constellation for autonomous driving.",
+    "Tianqi":         "China's Tianqi IoT narrow-band satellite constellation.",
   };
 
   useEffect(() => {
@@ -345,6 +413,7 @@ export default function GlobeView() {
     let propagateTimer: number | null = null;
     setSatellites([]);
     setSatCount(0);
+    setDataSource(null);
     satTlesRef.current = [];
     selectedSatsRef.current = [];
     orbitPathsRef.current = [];
@@ -365,7 +434,9 @@ export default function GlobeView() {
     }
 
     setLoading(true);
-    const opts = SAT_TYPE_OPTS[satType] ?? { search: satType };
+    const opts = satCompany !== "All"
+      ? (COMPANY_API_OPTS[satCompany] ?? { search: satCompany })
+      : (SAT_TYPE_OPTS[satType] ?? { search: satType });
     const PAGE_SIZE = 100;
 
     /** Propagate all loaded TLEs to current time and update the globe */
@@ -415,6 +486,7 @@ export default function GlobeView() {
         satTlesRef.current = allTles;
         totalItems = resp.totalItems ?? allTles.length;
         setSatCount(totalItems);
+        if (resp.dataSource) setDataSource(resp.dataSource);
 
         // Propagate and render immediately after each page so dots appear progressively
         propagateAll(allTles);
@@ -440,7 +512,7 @@ export default function GlobeView() {
       if (propagateTimer) window.clearTimeout(propagateTimer);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [satType, activePanel]);
+  }, [satType, satCompany, activePanel]);
 
   // Search autocomplete — debounced API call
   useEffect(() => {
@@ -674,7 +746,7 @@ export default function GlobeView() {
                 <select
                   id="sat-type-select"
                   value={satType}
-                  onChange={e => setSatType(e.target.value)}
+                  onChange={e => { setSatType(e.target.value); setSatCompany("All"); }}
                   style={{ fontSize: 13, padding: "2px 8px", borderRadius: 6, background: "#222", color: "#fff" }}
                 >
                   {SAT_TYPES.map(type => (
@@ -687,12 +759,35 @@ export default function GlobeView() {
                   {SAT_TYPE_DESCRIPTIONS[satType]}
                 </div>
               )}
+              <div style={{ marginTop: 8, marginBottom: 6 }}>
+                <label htmlFor="sat-company-select" style={{ marginRight: 8 }}>Company:</label>
+                <select
+                  id="sat-company-select"
+                  value={satCompany}
+                  onChange={e => setSatCompany(e.target.value)}
+                  style={{ fontSize: 13, padding: "2px 8px", borderRadius: 6, background: "#222", color: "#fff" }}
+                >
+                  {(COMPANY_OPTIONS[satType] ?? ["All"]).map(company => (
+                    <option key={company} value={company}>{company}</option>
+                  ))}
+                </select>
+              </div>
+              {COMPANY_DESCRIPTIONS[satCompany] && (
+                <div style={{ marginBottom: 4, color: "rgba(255,255,255,0.6)", fontStyle: "italic", lineHeight: 1.4, fontSize: 11 }}>
+                  {COMPANY_DESCRIPTIONS[satCompany]}
+                </div>
+              )}
             </div>
           )}
         </div>
 
         <div>Satellites: {satellites.length}{satCount > 0 && satellites.length < satCount ? ` / ${satCount}` : ""}</div>
         <div>Update: {lastUpdated ?? "--"}</div>
+        {dataSource && (
+          <div style={{ marginTop: 2, fontSize: 11, color: dataSource === "celestrak" ? "#66bb6a" : "#ffa726" }}>
+            Source: {dataSource === "celestrak" ? "CelesTrak" : "TLE API"}{dataSource !== "celestrak" ? " (fallback)" : ""}
+          </div>
+        )}
         {loading && (
           <div style={{ marginTop: 6, color: "#4fc3f7" }}>
             Loading satellite TLEs...
