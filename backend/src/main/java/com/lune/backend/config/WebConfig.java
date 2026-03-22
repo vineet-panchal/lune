@@ -11,8 +11,9 @@ public class WebConfig {
     @Bean
     public RestTemplate restTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(java.time.Duration.ofSeconds(10));
-        factory.setReadTimeout(java.time.Duration.ofSeconds(10));
+        // Keep external API failures short so fallback paths return promptly.
+        factory.setConnectTimeout(java.time.Duration.ofSeconds(3));
+        factory.setReadTimeout(java.time.Duration.ofSeconds(3));
         return new RestTemplate(factory);
     }
 }

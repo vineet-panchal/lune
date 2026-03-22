@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { fetchSatellites } from "../lib/api";
 import * as satellite from "satellite.js";
+import * as THREE from "three";
 import { feature } from "topojson-client";
 import type { Topology } from "topojson-specification";
 
@@ -40,6 +41,14 @@ type GlobeInstance = {
   pointRadius: (a: any) => GlobeInstance;
   pointLabel: (a: any) => GlobeInstance;
   onPointClick: (fn: (point: any, event: MouseEvent, coords: any) => void) => GlobeInstance;
+  objectsData: (d: any[]) => GlobeInstance;
+  objectLat: (a: any) => GlobeInstance;
+  objectLng: (a: any) => GlobeInstance;
+  objectAltitude: (a: any) => GlobeInstance;
+  objectLabel: (a: any) => GlobeInstance;
+  objectFacesSurface: (a: any) => GlobeInstance;
+  objectThreeObject: (a: any) => GlobeInstance;
+  onObjectClick: (fn: (obj: any, event: MouseEvent, coords: any) => void) => GlobeInstance;
   pointOfView: (pov: { lat: number; lng: number; altitude: number }, ms?: number) => GlobeInstance;
   pathsData: (d: any[]) => GlobeInstance;
   pathPoints: (a: any) => GlobeInstance;
@@ -296,13 +305,18 @@ export default function GlobeView() {
         .atmosphereAltitude(0.15)
         .atmosphereColor("rgba(100, 160, 255, 0.5)")
         .showGraticules(true)
-        .pointLat("latitude")
-        .pointLng("longitude")
-        .pointAltitude(0)
-        .pointColor((d: any) => d.color)
-        .pointRadius(0.12)
-        .pointLabel((d: any) => `${d.name} — ${Math.round(d.altitudeKm ?? 0)} km`)
-        .onPointClick((point: any) => {
+        .objectLat("latitude")
+        .objectLng("longitude")
+        .objectAltitude((d: any) => Math.max(0, (d.altitudeKm ?? 0) / EARTH_RADIUS_KM))
+        .objectFacesSurface(false)
+        .objectThreeObject((d: any) =>
+          new THREE.Mesh(
+            new THREE.SphereGeometry(0.2, 8, 8),
+            new THREE.MeshLambertMaterial({ color: d.color })
+          )
+        )
+        .objectLabel((d: any) => `${d.name} — ${Math.round(d.altitudeKm ?? 0)} km`)
+        .onObjectClick((point: any) => {
           if (!point?.satelliteId) return;
           const alreadySelected = selectedSatsRef.current.some(
             (s) => s.satelliteId === point.satelliteId
@@ -360,7 +374,7 @@ export default function GlobeView() {
             setOrbitPaths(nextPaths);
           }
         })
-        .pointsData([])
+        .objectsData([])
         .pathPoints("points")
         .pathPointLat((p: any) => p.lat)
         .pathPointLng((p: any) => p.lng)
@@ -429,7 +443,7 @@ export default function GlobeView() {
     // In search mode, clear the globe and don't fetch by type
     if (activePanel === "search") {
       setLoading(false);
-      if (globeRef.current) globeRef.current.pointsData([]);
+      if (globeRef.current) globeRef.current.objectsData([]);
       return () => { aborted = true; };
     }
 
@@ -463,7 +477,7 @@ export default function GlobeView() {
       if (!aborted) {
         setSatellites(sats);
         setLastUpdated(now.toLocaleTimeString());
-        if (globeRef.current) globeRef.current.pointsData(points);
+        if (globeRef.current) globeRef.current.objectsData(points);
       }
     }
 
@@ -596,7 +610,7 @@ export default function GlobeView() {
       const points = sats.map(s => ({ ...s, color: altitudeToColor(s.altitudeKm) }));
       setSatellites(sats);
       setLastUpdated(now.toLocaleTimeString());
-      if (globeRef.current) globeRef.current.pointsData(points);
+      if (globeRef.current) globeRef.current.objectsData(points);
       searchPropTimerRef.current = window.setTimeout(tick, 1000);
     };
     tick();

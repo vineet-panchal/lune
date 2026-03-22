@@ -104,6 +104,21 @@ public class SatelliteService {
         return Optional.empty();
     }
 
+    private SatelliteListItemDto enrichPopularSatellite(SatelliteListItemDto item) {
+        Optional<CelestrakSatelliteDto> tle = getCachedTle(item.getSatelliteId());
+        if (tle.isPresent()) {
+            return SatelliteListItemDto.builder()
+                    .satelliteId(item.getSatelliteId())
+                    .name(item.getName())
+                    .tleDate(item.getTleDate())
+                    .type(item.getType())
+                    .line1(tle.get().getLine1())
+                    .line2(tle.get().getLine2())
+                    .build();
+        }
+        return item;
+    }
+
     public SatelliteListResponseDto getSatellites(int page, int pageSize, String search, String sort, String group, String type) {
         // popular group — fast curated list, enrich with TLE data for client-side propagation
         if ("popular".equalsIgnoreCase(group != null ? group.strip() : null)) {
@@ -111,22 +126,9 @@ public class SatelliteService {
             int from = Math.min((page - 1) * pageSize, total);
             int to = Math.min(from + pageSize, total);
             List<SatelliteListItemDto> pageItems = from < to
-                    ? POPULAR_SATELLITES.subList(from, to).stream()
-                        .map(item -> {
-                            Optional<CelestrakSatelliteDto> tle = getCachedTle(item.getSatelliteId());
-                            if (tle.isPresent()) {
-                                return SatelliteListItemDto.builder()
-                                        .satelliteId(item.getSatelliteId())
-                                        .name(item.getName())
-                                        .tleDate(item.getTleDate())
-                                        .type(item.getType())
-                                        .line1(tle.get().getLine1())
-                                        .line2(tle.get().getLine2())
-                                        .build();
-                            }
-                            return item;
-                        })
-                        .toList()
+                    ? POPULAR_SATELLITES.subList(from, to).parallelStream()
+                    .map(this::enrichPopularSatellite)
+                    .toList()
                     : List.of();
             return SatelliteListResponseDto.builder()
                     .satellites(pageItems)
