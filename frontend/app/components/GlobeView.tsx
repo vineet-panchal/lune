@@ -68,6 +68,23 @@ type GlobeInstance = {
 };
 
 const EARTH_RADIUS_KM = 6371;
+const INTERACTION_IDLE_MS = 220;
+
+function getPropagationIntervalMs(count: number): number {
+  if (count >= 6000) return 5000;
+  if (count >= 3500) return 3500;
+  if (count >= 1800) return 2500;
+  if (count >= 900) return 1500;
+  return 1000;
+}
+
+function getUiUpdateIntervalMs(count: number): number {
+  if (count >= 6000) return 5000;
+  if (count >= 3500) return 3500;
+  if (count >= 1800) return 2500;
+  if (count >= 900) return 1500;
+  return 1000;
+}
 
 /** Altitude bands (km) and their assigned colours */
 const ALTITUDE_BANDS: { name: string; range: string; min: number; max: number; color: string }[] = [
@@ -175,6 +192,9 @@ export default function GlobeView() {
   const [searchLoading, setSearchLoading] = useState(false);
   const searchPropTimerRef = useRef<number | null>(null);
   const searchJustSelectedRef = useRef(false);
+  const isUserInteractingRef = useRef(false);
+  const interactionIdleTimerRef = useRef<number | null>(null);
+  const lastUiUpdateAtRef = useRef(0);
 
   const MAX_SELECTED = 10;
 
@@ -193,7 +213,7 @@ export default function GlobeView() {
 
   // Maps display label → backend params (type = CelesTrak group name, group = curated list)
   const SAT_TYPE_OPTS: Record<string, { type?: string; group?: string }> = {
-    "Internet":      { type: "STARLINK" },
+    "Internet":      { type: "INTERNET" },
     "Popular":       { group: "popular" },
     "Stations":      { type: "STATIONS" },
     "Starlink":      { type: "STARLINK" },
@@ -404,6 +424,35 @@ export default function GlobeView() {
 
       globeRef.current = globe;
 
+      const interactionTarget = containerRef.current;
+      const markInteraction = () => {
+        isUserInteractingRef.current = true;
+        if (interactionIdleTimerRef.current) {
+          window.clearTimeout(interactionIdleTimerRef.current);
+        }
+        interactionIdleTimerRef.current = window.setTimeout(() => {
+          isUserInteractingRef.current = false;
+        }, INTERACTION_IDLE_MS);
+      };
+
+      const endInteractionSoon = () => {
+        if (interactionIdleTimerRef.current) {
+          window.clearTimeout(interactionIdleTimerRef.current);
+        }
+        interactionIdleTimerRef.current = window.setTimeout(() => {
+          isUserInteractingRef.current = false;
+        }, INTERACTION_IDLE_MS);
+      };
+
+      interactionTarget.addEventListener("pointerdown", markInteraction, { passive: true });
+      interactionTarget.addEventListener("pointermove", markInteraction, { passive: true });
+      interactionTarget.addEventListener("pointerup", endInteractionSoon, { passive: true });
+      interactionTarget.addEventListener("pointercancel", endInteractionSoon, { passive: true });
+      interactionTarget.addEventListener("wheel", markInteraction, { passive: true });
+      interactionTarget.addEventListener("touchstart", markInteraction, { passive: true });
+      interactionTarget.addEventListener("touchmove", markInteraction, { passive: true });
+      interactionTarget.addEventListener("touchend", endInteractionSoon, { passive: true });
+
       const resize = () => {
         const el = containerRef.current;
         if (!el || !globeRef.current) return;
@@ -412,7 +461,21 @@ export default function GlobeView() {
       resize();
       window.addEventListener("resize", resize);
 
-      return () => window.removeEventListener("resize", resize);
+      return () => {
+        window.removeEventListener("resize", resize);
+        interactionTarget.removeEventListener("pointerdown", markInteraction);
+        interactionTarget.removeEventListener("pointermove", markInteraction);
+        interactionTarget.removeEventListener("pointerup", endInteractionSoon);
+        interactionTarget.removeEventListener("pointercancel", endInteractionSoon);
+        interactionTarget.removeEventListener("wheel", markInteraction);
+        interactionTarget.removeEventListener("touchstart", markInteraction);
+        interactionTarget.removeEventListener("touchmove", markInteraction);
+        interactionTarget.removeEventListener("touchend", endInteractionSoon);
+        if (interactionIdleTimerRef.current) {
+          window.clearTimeout(interactionIdleTimerRef.current);
+          interactionIdleTimerRef.current = null;
+        }
+      };
     };
 
     init();
@@ -428,6 +491,7 @@ export default function GlobeView() {
     setSatellites([]);
     setSatCount(0);
     setDataSource(null);
+    lastUiUpdateAtRef.current = 0;
     satTlesRef.current = [];
     selectedSatsRef.current = [];
     orbitPathsRef.current = [];
@@ -454,29 +518,49 @@ export default function GlobeView() {
     const PAGE_SIZE = 100;
 
     /** Propagate all loaded TLEs to current time and update the globe */
-    function propagateAll(tles: SatTle[]) {
+    function propagateAll(tles: SatTle[], forceUiUpdate = false) {
+      if (isUserInteractingRef.current && !forceUiUpdate) {
+        return;
+      }
+
       const now = new Date();
+      const shouldUpdateUi =
+        forceUiUpdate ||
+        Date.now() - lastUiUpdateAtRef.current >= getUiUpdateIntervalMs(tles.length);
+
       const sats: Sat[] = [];
+      const points: Array<Sat & { color: string }> = [];
       for (let i = 0; i < tles.length; i++) {
         const s = tles[i];
         const geo = propagateToGeodetic(s.satrec, now);
         if (geo) {
-          sats.push({
+          const satPoint = {
             satelliteId: s.satelliteId,
             name: s.name,
             latitude: geo.lat,
             longitude: geo.lng,
             altitudeKm: geo.alt,
-          });
+            color: altitudeToColor(geo.alt ?? 0),
+          };
+          points.push(satPoint);
+          if (shouldUpdateUi) {
+            sats.push({
+              satelliteId: satPoint.satelliteId,
+              name: satPoint.name,
+              latitude: satPoint.latitude,
+              longitude: satPoint.longitude,
+              altitudeKm: satPoint.altitudeKm,
+            });
+          }
         }
       }
-      const points = sats.map((s) => ({
-        ...s,
-        color: altitudeToColor(s.altitudeKm ?? 0),
-      }));
+
       if (!aborted) {
-        setSatellites(sats);
-        setLastUpdated(now.toLocaleTimeString());
+        if (shouldUpdateUi) {
+          setSatellites(sats);
+          setLastUpdated(now.toLocaleTimeString());
+          lastUiUpdateAtRef.current = Date.now();
+        }
         if (globeRef.current) globeRef.current.objectsData(points);
       }
     }
@@ -502,8 +586,12 @@ export default function GlobeView() {
         setSatCount(totalItems);
         if (resp.dataSource) setDataSource(resp.dataSource);
 
-        // Propagate and render immediately after each page so dots appear progressively
-        propagateAll(allTles);
+        // For large catalogs, avoid full propagation on every fetched page.
+        const reachedEnd = (resp.satellites ?? []).length < PAGE_SIZE || allTles.length >= totalItems;
+        const shouldPreview = page === 1 || page % 5 === 0 || reachedEnd;
+        if (shouldPreview) {
+          propagateAll(allTles, true);
+        }
         setLoading(false);
 
         if ((resp.satellites ?? []).length < PAGE_SIZE) break;
@@ -513,10 +601,13 @@ export default function GlobeView() {
       // Start 1-second propagation loop — pure math, no network calls
       if (!aborted && allTles.length > 0) {
         const tick = () => {
-          propagateAll(satTlesRef.current);
-          if (!aborted) propagateTimer = window.setTimeout(tick, 1000);
+          const currentTles = satTlesRef.current;
+          propagateAll(currentTles);
+          if (!aborted) {
+            propagateTimer = window.setTimeout(tick, getPropagationIntervalMs(currentTles.length));
+          }
         };
-        propagateTimer = window.setTimeout(tick, 1000);
+        propagateTimer = window.setTimeout(tick, getPropagationIntervalMs(allTles.length));
       }
     }
 
