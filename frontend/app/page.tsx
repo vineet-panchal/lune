@@ -1,9 +1,5 @@
-import GlobeView from "./components/GlobeView";
+import SatelliteTrackerPage from "./pages/SatelliteTrackerPage";
 
 export default function Home() {
-  return (
-    <>
-      <GlobeView />
-    </>
-  );
+  return <SatelliteTrackerPage />;
 }

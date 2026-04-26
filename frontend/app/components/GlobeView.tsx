@@ -6,6 +6,12 @@ import * as satellite from "satellite.js";
 import * as THREE from "three";
 import { feature } from "topojson-client";
 import type { Topology } from "topojson-specification";
+import GlobeCanvas from "./globe/GlobeCanvas";
+import Navbar from "./layout/Navbar";
+import LuneGlobePanel from "./panels/LuneGlobePanel";
+import OrbitalViewPanel from "./panels/OrbitalViewPanel";
+import SelectedSatellitesPanel from "./panels/SelectedSatellitesPanel";
+import VisualizationPanel from "./panels/VisualizationPanel";
 
 type Sat = {
   satelliteId: number;
@@ -805,592 +811,75 @@ export default function GlobeView() {
 
   return (
     <div style={{ position: "relative", width: "100vw", height: "100vh" }}>
-      <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
-      <div
-        style={{
-          position: "absolute",
-          top: 12,
-          left: 12,
-          padding: "10px 12px",
-          borderRadius: 10,
-          background: "rgba(0,0,0,0.55)",
-          border: "1px solid rgba(255,255,255,0.12)",
-          color: "white",
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-          fontSize: 12,
-          lineHeight: 1.4,
-          maxWidth: 360,
-        }}
-      >
-        <div style={{ fontWeight: 700, marginBottom: 10 }}>Lune Globe</div>
+      <GlobeCanvas containerRef={containerRef} />
 
-        {/* Search A Satellite dropdown */}
-        <div style={{ marginBottom: 4 }}>
-          <div
-            onClick={() => {
-              if (activePanel !== "search") {
-                setActivePanel("search");
-                setSearchQuery("");
-                setSearchSuggestions([]);
-              }
-            }}
-            style={{
-              cursor: "pointer",
-              padding: "6px 8px",
-              borderRadius: 6,
-              background: activePanel === "search" ? "rgba(255,255,255,0.1)" : "transparent",
-              border: "1px solid rgba(255,255,255,0.15)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              userSelect: "none",
-            }}
-          >
-            <span style={{ fontWeight: 600 }}>Search A Satellite</span>
-            <span style={{ fontSize: 10, opacity: 0.6 }}>{activePanel === "search" ? "▾" : "▸"}</span>
-          </div>
-          {activePanel === "search" && (
-            <div style={{ padding: "8px 4px 4px" }}>
-              <div style={{ marginBottom: 6, color: "rgba(255,255,255,0.6)", fontStyle: "italic", fontSize: 11 }}>
-                Search for a satellite, given their name
-              </div>
-              <div style={{ position: "relative" }}>
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="e.g. INTELSAT, ISS..."
-                  style={{
-                    width: "100%",
-                    padding: "6px 8px",
-                    borderRadius: 6,
-                    border: "1px solid rgba(255,255,255,0.2)",
-                    background: "#181818",
-                    color: "#fff",
-                    fontSize: 12,
-                    fontFamily: "inherit",
-                    outline: "none",
-                    boxSizing: "border-box",
-                  }}
-                />
-                {searchLoading && (
-                  <div style={{ marginTop: 4, color: "#4fc3f7", fontSize: 11 }}>Searching...</div>
-                )}
-                {searchSuggestions.length > 0 && (
-                  <div
-                    style={{
-                      marginTop: 4,
-                      maxHeight: 180,
-                      overflowY: "auto",
-                      borderRadius: 6,
-                      border: "1px solid rgba(255,255,255,0.15)",
-                      background: "rgba(20,20,30,0.95)",
-                    }}
-                  >
-                    {searchSuggestions.map((s: any) => (
-                      <div
-                        key={s.satelliteId}
-                        onClick={() => handleSearchSelect(s)}
-                        style={{
-                          padding: "5px 8px",
-                          cursor: "pointer",
-                          fontSize: 11,
-                          borderBottom: "1px solid rgba(255,255,255,0.06)",
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                        }}
-                        onMouseEnter={(e) => {
-                          (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.1)";
-                        }}
-                        onMouseLeave={(e) => {
-                          (e.currentTarget as HTMLElement).style.background = "transparent";
-                        }}
-                      >
-                        {s.name}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Filter By Type dropdown */}
-        <div style={{ marginBottom: 8 }}>
-          <div
-            onClick={() => {
-              if (activePanel !== "filter") {
-                setActivePanel("filter");
-              }
-            }}
-            style={{
-              cursor: "pointer",
-              padding: "6px 8px",
-              borderRadius: 6,
-              background: activePanel === "filter" ? "rgba(255,255,255,0.1)" : "transparent",
-              border: "1px solid rgba(255,255,255,0.15)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              userSelect: "none",
-            }}
-          >
-            <span style={{ fontWeight: 600 }}>Filter By Type</span>
-            <span style={{ fontSize: 10, opacity: 0.6 }}>{activePanel === "filter" ? "▾" : "▸"}</span>
-          </div>
-          {activePanel === "filter" && (
-            <div style={{ padding: "8px 4px 4px" }}>
-              <div style={{ marginBottom: 6 }}>
-                <label htmlFor="sat-type-select" style={{ marginRight: 8 }}>Type:</label>
-                <select
-                  id="sat-type-select"
-                  value={satType}
-                  onChange={e => { setSatType(e.target.value); setSatCompany("All"); }}
-                  style={{ fontSize: 13, padding: "2px 8px", borderRadius: 6, background: "#222", color: "#fff" }}
-                >
-                  {SAT_TYPES.map(type => (
-                    <option key={type} value={type}>{type}</option>
-                  ))}
-                </select>
-              </div>
-              {SAT_TYPE_DESCRIPTIONS[satType] && (
-                <div style={{ marginBottom: 4, color: "rgba(255,255,255,0.6)", fontStyle: "italic", lineHeight: 1.4, fontSize: 11 }}>
-                  {SAT_TYPE_DESCRIPTIONS[satType]}
-                </div>
-              )}
-              <div style={{ marginTop: 8, marginBottom: 6 }}>
-                <label htmlFor="sat-company-select" style={{ marginRight: 8 }}>Company:</label>
-                <select
-                  id="sat-company-select"
-                  value={satCompany}
-                  onChange={e => setSatCompany(e.target.value)}
-                  style={{ fontSize: 13, padding: "2px 8px", borderRadius: 6, background: "#222", color: "#fff" }}
-                >
-                  {(COMPANY_OPTIONS[satType] ?? ["All"]).map(company => (
-                    <option key={company} value={company}>{company}</option>
-                  ))}
-                </select>
-              </div>
-              {COMPANY_DESCRIPTIONS[satCompany] && (
-                <div style={{ marginBottom: 4, color: "rgba(255,255,255,0.6)", fontStyle: "italic", lineHeight: 1.4, fontSize: 11 }}>
-                  {COMPANY_DESCRIPTIONS[satCompany]}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div>Satellites: {satellites.length}{satCount > 0 && satellites.length < satCount ? ` / ${satCount}` : ""}</div>
-        <div>Update: {lastUpdated ?? "--"}</div>
-        {dataSource && (
-          <div style={{ marginTop: 2, fontSize: 11, color: dataSource === "celestrak" ? "#66bb6a" : "#ffa726" }}>
-            Source: {dataSource === "celestrak" ? "CelesTrak" : "TLE API"}{dataSource !== "celestrak" ? " (fallback)" : ""}
-          </div>
-        )}
-        {loading && (
-          <div style={{ marginTop: 6, color: "#4fc3f7" }}>
-            Loading satellite TLEs...
-          </div>
-        )}
-        <div style={{ marginTop: 6, color: "rgba(255,255,255,0.75)" }}>
-          Tip: click a satellite dot to show its orbit path.
-        </div>
-      </div>
-
-      {/* Navbar */}
-      <div
-        style={{
-          position: "absolute",
-          top: 12,
-          left: "50%",
-          transform: "translateX(-50%)",
-          padding: "8px 20px",
-          borderRadius: 10,
-          background: "rgba(0,0,0,0.55)",
-          border: "1px solid rgba(255,255,255,0.12)",
-          color: "white",
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-          fontSize: 13,
-          display: "flex",
-          alignItems: "center",
-          gap: 24,
-          zIndex: 10,
-          whiteSpace: "nowrap",
-        }}
-      >
-        <span style={{ fontWeight: 700, fontSize: 15, letterSpacing: 2 }}>LUNE</span>
-        <div
-          style={{
-            width: 1,
-            height: 18,
-            background: "rgba(255,255,255,0.2)",
-          }}
-        />
-        <div style={{ display: "flex", gap: 6 }}>
-          <button
-            style={{
-              background: "rgba(255,255,255,0.12)",
-              border: "1px solid rgba(255,255,255,0.25)",
-              color: "#fff",
-              padding: "4px 12px",
-              borderRadius: 6,
-              fontSize: 12,
-              cursor: "default",
-              fontFamily: "inherit",
-            }}
-          >
-            Satellite Tracker
-          </button>
-          {["Constellations", "News", "Trips"].map((label) => (
-            <button
-              key={label}
-              disabled
-              style={{
-                background: "transparent",
-                border: "1px solid rgba(255,255,255,0.08)",
-                color: "rgba(255,255,255,0.3)",
-                padding: "4px 12px",
-                borderRadius: 6,
-                fontSize: 12,
-                cursor: "not-allowed",
-                fontFamily: "inherit",
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Selected satellites side panel */}
-      {selectedSats.length > 0 && (
-        <div
-          style={{
-            position: "absolute",
-            top: 12,
-            right: 12,
-            padding: "10px 14px",
-            borderRadius: 10,
-            background: "rgba(0,0,0,0.65)",
-            border: "1px solid rgba(255,255,255,0.12)",
-            color: "white",
-            fontFamily:
-              "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-            fontSize: 12,
-            lineHeight: 1.6,
-            minWidth: 200,
-            maxWidth: 280,
-            maxHeight: "50vh",
-            overflowY: "auto",
-          }}
-        >
-          {selectedSats.map((s) => (
-            <div
-              key={s.satelliteId}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "4px 0",
-                borderBottom: "1px solid rgba(255,255,255,0.08)",
-              }}
-            >
-              <span style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, minWidth: 0 }}>
-                <span
-                  style={{
-                    width: 8,
-                    height: 8,
-                    borderRadius: "50%",
-                    background: s.color,
-                    flexShrink: 0,
-                  }}
-                />
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {s.name}
-                </span>
-              </span>
-              <button
-                onClick={() => removeSat(s.satelliteId)}
-                style={{
-                  background: "none",
-                  border: "none",
-                  color: "rgba(255,255,255,0.5)",
-                  cursor: "pointer",
-                  fontSize: 14,
-                  padding: "0 4px",
-                  marginLeft: 8,
-                  flexShrink: 0,
-                }}
-                title="Remove"
-              >
-                ×
-              </button>
-            </div>
-          ))}
-          <div
-            style={{
-              marginTop: 6,
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              fontSize: 11,
-            }}
-          >
-            <span style={{ color: "rgba(255,255,255,0.3)" }}>max {MAX_SELECTED}</span>
-            <span
-              style={{
-                color: "rgba(255,255,255,0.4)",
-                cursor: "pointer",
-              }}
-              onClick={clearAll}
-            >
-              clear all
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Altitude legend – bottom right */}
-      <div
-        style={{
-          position: "absolute",
-          bottom: 16,
-          right: 16,
-          padding: "14px 16px",
-          borderRadius: 12,
-          background: "rgba(10,10,14,0.82)",
-          border: "1px solid rgba(255,255,255,0.10)",
-          color: "white",
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-          fontSize: 11,
-          zIndex: 10,
-          minWidth: 210,
-        }}
-      >
-        <div style={{ fontWeight: 700, fontSize: 13, textAlign: "center", marginBottom: 10, letterSpacing: 0.3 }}>
-          Orbital Altitude
-        </div>
-        <div style={{ borderTop: "1px solid rgba(255,255,255,0.10)", margin: "0 -16px 10px", padding: 0 }} />
-        {ALTITUDE_BANDS.map((band) => (
-          <div key={band.name} style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 8 }}>
-            <span
-              style={{
-                width: 14,
-                height: 14,
-                borderRadius: 3,
-                background: band.color,
-                flexShrink: 0,
-                marginTop: 1,
-              }}
-            />
-            <div style={{ lineHeight: 1.35 }}>
-              <div style={{ fontWeight: 600, fontSize: 11 }}>{band.name}</div>
-              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)" }}>{band.range}</div>
-            </div>
-          </div>
-        ))}
-        <div style={{ borderTop: "1px solid rgba(255,255,255,0.10)", margin: "6px -16px 8px", padding: 0 }} />
-        <div style={{ fontSize: 10, color: "rgba(255,255,255,0.6)", marginBottom: 4, fontWeight: 600 }}>
-          Distribution ({satellites.length}{satCount > 0 && satellites.length < satCount ? `/${satCount}` : ""} satellites)
-        </div>
-        {(() => {
-          const counts: Record<string, number> = {};
-          for (const band of ALTITUDE_BANDS) counts[band.name] = 0;
-          for (const s of satellites) {
-            for (const band of ALTITUDE_BANDS) {
-              if (s.altitudeKm < band.max) { counts[band.name]++; break; }
-            }
+      <LuneGlobePanel
+        activePanel={activePanel}
+        onOpenSearchPanel={() => {
+          if (activePanel !== "search") {
+            setActivePanel("search");
+            setSearchQuery("");
+            setSearchSuggestions([]);
           }
-          const total = satellites.length || 1;
-          return ALTITUDE_BANDS.filter((band) => counts[band.name] > 0).map((band) => (
-            <div key={band.name} style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "rgba(255,255,255,0.5)", lineHeight: 1.7 }}>
-              <span>{band.name.replace(/ \(.*\)/, "")}</span>
-              <span style={{ marginLeft: 12, whiteSpace: "nowrap" }}>{counts[band.name]} ({(counts[band.name] / total * 100).toFixed(1)}%)</span>
-            </div>
-          ));
-        })()}
-      </div>
-
-      {/* Visualization Control Panel – bottom left */}
-      <div
-        style={{
-          position: "absolute",
-          bottom: 16,
-          left: 16,
-          padding: "12px 16px",
-          borderRadius: 12,
-          background: "rgba(10,10,14,0.82)",
-          border: "1px solid rgba(255,255,255,0.10)",
-          color: "white",
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-          fontSize: 11,
-          zIndex: 9,
-          display: "flex",
-          gap: 12,
-          alignItems: "center",
-          flexWrap: "wrap",
-          maxWidth: "calc(100vw - 32px)",
         }}
-      >
-        <div style={{ fontWeight: 700, fontSize: 12, letterSpacing: 0.3, minWidth: "fit-content" }}>
-          VISUALIZE
-        </div>
-        
-        {/* Divider */}
-        <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.15)" }} />
+        onOpenFilterPanel={() => {
+          if (activePanel !== "filter") {
+            setActivePanel("filter");
+          }
+        }}
+        searchQuery={searchQuery}
+        onSearchQueryChange={setSearchQuery}
+        searchLoading={searchLoading}
+        searchSuggestions={searchSuggestions}
+        onSearchSelect={handleSearchSelect}
+        satType={satType}
+        satCompany={satCompany}
+        satTypes={SAT_TYPES}
+        satTypeDescriptions={SAT_TYPE_DESCRIPTIONS}
+        companyOptions={COMPANY_OPTIONS}
+        companyDescriptions={COMPANY_DESCRIPTIONS}
+        onSatTypeChange={(value) => {
+          setSatType(value);
+          setSatCompany("All");
+        }}
+        onSatCompanyChange={setSatCompany}
+        satellitesLength={satellites.length}
+        satCount={satCount}
+        lastUpdated={lastUpdated}
+        dataSource={dataSource}
+        loading={loading}
+      />
 
-        {/* Day/Night Mode Button */}
-        <button
-          onClick={toggleDayMode}
-          style={{
-            padding: "6px 12px",
-            borderRadius: 6,
-            background: isDayMode ? "rgba(255,193,7,0.3)" : "rgba(100,160,255,0.2)",
-            border: `1px solid ${isDayMode ? "rgba(255,193,7,0.5)" : "rgba(100,160,255,0.3)"}`,
-            color: isDayMode ? "#ffc107" : "#64a0ff",
-            cursor: "pointer",
-            fontSize: 11,
-            fontFamily: "inherit",
-            fontWeight: 600,
-            transition: "all 0.2s ease",
-            whiteSpace: "nowrap",
-          }}
-          title={isDayMode ? "Switch to Night Mode" : "Switch to Day Mode"}
-        >
-          {isDayMode ? "☀️ Day" : "🌙 Night"}
-        </button>
+      <Navbar />
 
-        {/* Atmosphere Toggle */}
-        <button
-          onClick={() => updateAtmosphere(!showAtmosphere)}
-          style={{
-            padding: "6px 12px",
-            borderRadius: 6,
-            background: showAtmosphere ? "rgba(100,160,255,0.2)" : "rgba(100,100,100,0.2)",
-            border: `1px solid ${showAtmosphere ? "rgba(100,160,255,0.3)" : "rgba(100,100,100,0.3)"}`,
-            color: showAtmosphere ? "#64a0ff" : "rgba(255,255,255,0.4)",
-            cursor: "pointer",
-            fontSize: 11,
-            fontFamily: "inherit",
-            whiteSpace: "nowrap",
-          }}
-          title={showAtmosphere ? "Hide Atmosphere" : "Show Atmosphere"}
-        >
-          {showAtmosphere ? "✓" : ""} Atmosphere
-        </button>
+      <SelectedSatellitesPanel
+        selectedSats={selectedSats}
+        maxSelected={MAX_SELECTED}
+        onRemoveSat={removeSat}
+        onClearAll={clearAll}
+      />
 
-        {/* Graticules Toggle */}
-        <button
-          onClick={() => updateGraticules(!showGraticules)}
-          style={{
-            padding: "6px 12px",
-            borderRadius: 6,
-            background: showGraticules ? "rgba(100,160,255,0.2)" : "rgba(100,100,100,0.2)",
-            border: `1px solid ${showGraticules ? "rgba(100,160,255,0.3)" : "rgba(100,100,100,0.3)"}`,
-            color: showGraticules ? "#64a0ff" : "rgba(255,255,255,0.4)",
-            cursor: "pointer",
-            fontSize: 11,
-            fontFamily: "inherit",
-            whiteSpace: "nowrap",
-          }}
-          title={showGraticules ? "Hide Grid" : "Show Grid"}
-        >
-          {showGraticules ? "✓" : ""} Grid
-        </button>
+      <OrbitalViewPanel
+        altitudeBands={ALTITUDE_BANDS}
+        satellites={satellites}
+        satCount={satCount}
+      />
 
-        {/* Atmosphere Color Presets */}
-        {!isDayMode && (
-          <>
-            <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 10 }}>|</div>
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <span style={{ fontSize: 10, color: "rgba(255,255,255,0.5)" }}>Atmosphere:</span>
-              {[
-                { color: "rgba(100, 160, 255, 0.5)", label: "Blue" },
-                { color: "rgba(100, 200, 255, 0.4)", label: "Cyan" },
-                { color: "rgba(150, 100, 255, 0.5)", label: "Purple" },
-                { color: "rgba(255, 100, 150, 0.4)", label: "Pink" },
-              ].map((preset) => (
-                <button
-                  key={preset.label}
-                  onClick={() => updateAtmosphereColorPreset(preset.color)}
-                  style={{
-                    width: 18,
-                    height: 18,
-                    borderRadius: 3,
-                    background: preset.color,
-                    border: atmosphereColor === preset.color ? "2px solid #fff" : "1px solid rgba(255,255,255,0.3)",
-                    cursor: "pointer",
-                    padding: 0,
-                  }}
-                  title={preset.label}
-                />
-              ))}
-            </div>
-          </>
-        )}
-
-        {/* Atmosphere Altitude Slider */}
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", minWidth: "fit-content" }}>Altitude:</span>
-          <input
-            type="range"
-            min="0.05"
-            max="0.3"
-            step="0.01"
-            value={atmosphereAltitude}
-            onChange={(e) => updateAtmosphereAltitude(parseFloat(e.target.value))}
-            style={{
-              width: 80,
-              height: 4,
-              cursor: "pointer",
-            }}
-            title="Adjust atmosphere thickness"
-          />
-          <span style={{ fontSize: 9, color: "rgba(255,255,255,0.4)", minWidth: "30px" }}>
-            {(atmosphereAltitude * 100).toFixed(0)}%
-          </span>
-        </div>
-
-        {/* Rotation Speed Slider */}
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <span style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", minWidth: "fit-content" }}>Rotate:</span>
-          <input
-            type="range"
-            min="0"
-            max="3"
-            step="0.5"
-            value={rotationSpeed}
-            onChange={(e) => updateRotationSpeed(parseFloat(e.target.value))}
-            style={{
-              width: 80,
-              height: 4,
-              cursor: "pointer",
-            }}
-            title="Adjust auto-rotation speed"
-          />
-        </div>
-
-        {/* Reset Button */}
-        <button
-          onClick={resetVisualization}
-          style={{
-            padding: "6px 10px",
-            borderRadius: 6,
-            background: "rgba(255,255,255,0.08)",
-            border: "1px solid rgba(255,255,255,0.2)",
-            color: "rgba(255,255,255,0.6)",
-            cursor: "pointer",
-            fontSize: 11,
-            fontFamily: "inherit",
-            whiteSpace: "nowrap",
-          }}
-          title="Reset to defaults"
-        >
-          Reset
-        </button>
-      </div>
+      <VisualizationPanel
+        isDayMode={isDayMode}
+        showAtmosphere={showAtmosphere}
+        showGraticules={showGraticules}
+        atmosphereAltitude={atmosphereAltitude}
+        atmosphereColor={atmosphereColor}
+        rotationSpeed={rotationSpeed}
+        onToggleDayMode={toggleDayMode}
+        onToggleAtmosphere={() => updateAtmosphere(!showAtmosphere)}
+        onToggleGraticules={() => updateGraticules(!showGraticules)}
+        onUpdateAtmosphereColorPreset={updateAtmosphereColorPreset}
+        onUpdateAtmosphereAltitude={updateAtmosphereAltitude}
+        onUpdateRotationSpeed={updateRotationSpeed}
+        onResetVisualization={resetVisualization}
+      />
 
       {/* Error toast – bottom left */}
       {errorMsg && (
