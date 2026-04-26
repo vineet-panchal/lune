@@ -196,6 +196,14 @@ export default function GlobeView() {
   const interactionIdleTimerRef = useRef<number | null>(null);
   const lastUiUpdateAtRef = useRef(0);
 
+  // Visualization control state
+  const [isDayMode, setIsDayMode] = useState(false);
+  const [showAtmosphere, setShowAtmosphere] = useState(true);
+  const [showGraticules, setShowGraticules] = useState(true);
+  const [atmosphereAltitude, setAtmosphereAltitude] = useState(0.15);
+  const [atmosphereColor, setAtmosphereColor] = useState("rgba(100, 160, 255, 0.5)");
+  const [rotationSpeed, setRotationSpeed] = useState(1);
+
   const MAX_SELECTED = 10;
 
   const SAT_TYPES = [
@@ -424,6 +432,13 @@ export default function GlobeView() {
 
       globeRef.current = globe;
 
+      // Initialize auto-rotation
+      const controls = (globe as any).controls?.();
+      if (controls) {
+        controls.autoRotate = true;
+        controls.autoRotateSpeed = 2;
+      }
+
       const interactionTarget = containerRef.current;
       const markInteraction = () => {
         isUserInteractingRef.current = true;
@@ -587,14 +602,10 @@ export default function GlobeView() {
         if (resp.dataSource) setDataSource(resp.dataSource);
 
         // For large catalogs, avoid full propagation on every fetched page.
-        const reachedEnd = (resp.satellites ?? []).length < PAGE_SIZE || allTles.length >= totalItems;
-        const shouldPreview = page === 1 || page % 5 === 0 || reachedEnd;
-        if (shouldPreview) {
-          propagateAll(allTles, true);
-        }
+        propagateAll(allTles, true);
         setLoading(false);
 
-        if ((resp.satellites ?? []).length < PAGE_SIZE) break;
+        if ((resp.satellites ?? []).length === 0 || page * PAGE_SIZE >= totalItems) break;
         page++;
       }
 
@@ -705,6 +716,91 @@ export default function GlobeView() {
       searchPropTimerRef.current = window.setTimeout(tick, 1000);
     };
     tick();
+  }, []);
+
+  const toggleDayMode = useCallback(() => {
+    if (!globeRef.current) return;
+    const newDayMode = !isDayMode;
+    setIsDayMode(newDayMode);
+    
+    if (newDayMode) {
+      globeRef.current
+        .backgroundColor("#ffffff")
+        .backgroundImageUrl("")
+        .globeImageUrl("//unpkg.com/three-globe/example/img/earth-day.jpg")
+        .atmosphereColor("rgba(200, 200, 200, 0.3)");
+    } else {
+      const starBg = generateStarfieldDataUrl(2048, 1024, 4000);
+      globeRef.current
+        .backgroundColor("#000011")
+        .backgroundImageUrl(starBg)
+        .globeImageUrl("//unpkg.com/three-globe/example/img/earth-night.jpg")
+        .atmosphereColor(atmosphereColor);
+    }
+  }, [isDayMode, atmosphereColor]);
+
+  const updateAtmosphere = useCallback((showAtmo: boolean) => {
+    if (!globeRef.current) return;
+    setShowAtmosphere(showAtmo);
+    globeRef.current.showAtmosphere(showAtmo);
+  }, []);
+
+  const updateGraticules = useCallback((showGrat: boolean) => {
+    if (!globeRef.current) return;
+    setShowGraticules(showGrat);
+    globeRef.current.showGraticules(showGrat);
+  }, []);
+
+  const updateAtmosphereAltitude = useCallback((altitude: number) => {
+    if (!globeRef.current) return;
+    setAtmosphereAltitude(altitude);
+    globeRef.current.atmosphereAltitude(altitude);
+  }, []);
+
+  const updateAtmosphereColorPreset = useCallback((color: string) => {
+    if (!globeRef.current || isDayMode) return;
+    setAtmosphereColor(color);
+    globeRef.current.atmosphereColor(color);
+  }, [isDayMode]);
+
+  const updateRotationSpeed = useCallback((speed: number) => {
+    if (!globeRef.current) return;
+    setRotationSpeed(speed);
+    const controls = (globeRef.current as any).controls?.();
+    if (controls) {
+      if (speed === 0) {
+        controls.autoRotate = false;
+      } else {
+        controls.autoRotate = true;
+        controls.autoRotateSpeed = speed * 2;
+      }
+    }
+  }, []);
+
+  const resetVisualization = useCallback(() => {
+    if (!globeRef.current) return;
+    setIsDayMode(false);
+    setShowAtmosphere(true);
+    setShowGraticules(true);
+    setAtmosphereAltitude(0.15);
+    setAtmosphereColor("rgba(100, 160, 255, 0.5)");
+    setRotationSpeed(1);
+    
+    const starBg = generateStarfieldDataUrl(2048, 1024, 4000);
+    globeRef.current
+      .backgroundColor("#000011")
+      .backgroundImageUrl(starBg)
+      .globeImageUrl("//unpkg.com/three-globe/example/img/earth-night.jpg")
+      .showAtmosphere(true)
+      .atmosphereAltitude(0.15)
+      .atmosphereColor("rgba(100, 160, 255, 0.5)")
+      .showGraticules(true);
+    
+    const controls = (globeRef.current as any).controls?.();
+    if (controls) {
+      controls.autoRotate = true;
+      controls.autoRotateSpeed = 2;
+    }
   }, []);
 
   return (
@@ -1115,6 +1211,185 @@ export default function GlobeView() {
             </div>
           ));
         })()}
+      </div>
+
+      {/* Visualization Control Panel – bottom left */}
+      <div
+        style={{
+          position: "absolute",
+          bottom: 16,
+          left: 16,
+          padding: "12px 16px",
+          borderRadius: 12,
+          background: "rgba(10,10,14,0.82)",
+          border: "1px solid rgba(255,255,255,0.10)",
+          color: "white",
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          fontSize: 11,
+          zIndex: 9,
+          display: "flex",
+          gap: 12,
+          alignItems: "center",
+          flexWrap: "wrap",
+          maxWidth: "calc(100vw - 32px)",
+        }}
+      >
+        <div style={{ fontWeight: 700, fontSize: 12, letterSpacing: 0.3, minWidth: "fit-content" }}>
+          VISUALIZE
+        </div>
+        
+        {/* Divider */}
+        <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.15)" }} />
+
+        {/* Day/Night Mode Button */}
+        <button
+          onClick={toggleDayMode}
+          style={{
+            padding: "6px 12px",
+            borderRadius: 6,
+            background: isDayMode ? "rgba(255,193,7,0.3)" : "rgba(100,160,255,0.2)",
+            border: `1px solid ${isDayMode ? "rgba(255,193,7,0.5)" : "rgba(100,160,255,0.3)"}`,
+            color: isDayMode ? "#ffc107" : "#64a0ff",
+            cursor: "pointer",
+            fontSize: 11,
+            fontFamily: "inherit",
+            fontWeight: 600,
+            transition: "all 0.2s ease",
+            whiteSpace: "nowrap",
+          }}
+          title={isDayMode ? "Switch to Night Mode" : "Switch to Day Mode"}
+        >
+          {isDayMode ? "☀️ Day" : "🌙 Night"}
+        </button>
+
+        {/* Atmosphere Toggle */}
+        <button
+          onClick={() => updateAtmosphere(!showAtmosphere)}
+          style={{
+            padding: "6px 12px",
+            borderRadius: 6,
+            background: showAtmosphere ? "rgba(100,160,255,0.2)" : "rgba(100,100,100,0.2)",
+            border: `1px solid ${showAtmosphere ? "rgba(100,160,255,0.3)" : "rgba(100,100,100,0.3)"}`,
+            color: showAtmosphere ? "#64a0ff" : "rgba(255,255,255,0.4)",
+            cursor: "pointer",
+            fontSize: 11,
+            fontFamily: "inherit",
+            whiteSpace: "nowrap",
+          }}
+          title={showAtmosphere ? "Hide Atmosphere" : "Show Atmosphere"}
+        >
+          {showAtmosphere ? "✓" : ""} Atmosphere
+        </button>
+
+        {/* Graticules Toggle */}
+        <button
+          onClick={() => updateGraticules(!showGraticules)}
+          style={{
+            padding: "6px 12px",
+            borderRadius: 6,
+            background: showGraticules ? "rgba(100,160,255,0.2)" : "rgba(100,100,100,0.2)",
+            border: `1px solid ${showGraticules ? "rgba(100,160,255,0.3)" : "rgba(100,100,100,0.3)"}`,
+            color: showGraticules ? "#64a0ff" : "rgba(255,255,255,0.4)",
+            cursor: "pointer",
+            fontSize: 11,
+            fontFamily: "inherit",
+            whiteSpace: "nowrap",
+          }}
+          title={showGraticules ? "Hide Grid" : "Show Grid"}
+        >
+          {showGraticules ? "✓" : ""} Grid
+        </button>
+
+        {/* Atmosphere Color Presets */}
+        {!isDayMode && (
+          <>
+            <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 10 }}>|</div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span style={{ fontSize: 10, color: "rgba(255,255,255,0.5)" }}>Atmosphere:</span>
+              {[
+                { color: "rgba(100, 160, 255, 0.5)", label: "Blue" },
+                { color: "rgba(100, 200, 255, 0.4)", label: "Cyan" },
+                { color: "rgba(150, 100, 255, 0.5)", label: "Purple" },
+                { color: "rgba(255, 100, 150, 0.4)", label: "Pink" },
+              ].map((preset) => (
+                <button
+                  key={preset.label}
+                  onClick={() => updateAtmosphereColorPreset(preset.color)}
+                  style={{
+                    width: 18,
+                    height: 18,
+                    borderRadius: 3,
+                    background: preset.color,
+                    border: atmosphereColor === preset.color ? "2px solid #fff" : "1px solid rgba(255,255,255,0.3)",
+                    cursor: "pointer",
+                    padding: 0,
+                  }}
+                  title={preset.label}
+                />
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* Atmosphere Altitude Slider */}
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", minWidth: "fit-content" }}>Altitude:</span>
+          <input
+            type="range"
+            min="0.05"
+            max="0.3"
+            step="0.01"
+            value={atmosphereAltitude}
+            onChange={(e) => updateAtmosphereAltitude(parseFloat(e.target.value))}
+            style={{
+              width: 80,
+              height: 4,
+              cursor: "pointer",
+            }}
+            title="Adjust atmosphere thickness"
+          />
+          <span style={{ fontSize: 9, color: "rgba(255,255,255,0.4)", minWidth: "30px" }}>
+            {(atmosphereAltitude * 100).toFixed(0)}%
+          </span>
+        </div>
+
+        {/* Rotation Speed Slider */}
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <span style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", minWidth: "fit-content" }}>Rotate:</span>
+          <input
+            type="range"
+            min="0"
+            max="3"
+            step="0.5"
+            value={rotationSpeed}
+            onChange={(e) => updateRotationSpeed(parseFloat(e.target.value))}
+            style={{
+              width: 80,
+              height: 4,
+              cursor: "pointer",
+            }}
+            title="Adjust auto-rotation speed"
+          />
+        </div>
+
+        {/* Reset Button */}
+        <button
+          onClick={resetVisualization}
+          style={{
+            padding: "6px 10px",
+            borderRadius: 6,
+            background: "rgba(255,255,255,0.08)",
+            border: "1px solid rgba(255,255,255,0.2)",
+            color: "rgba(255,255,255,0.6)",
+            cursor: "pointer",
+            fontSize: 11,
+            fontFamily: "inherit",
+            whiteSpace: "nowrap",
+          }}
+          title="Reset to defaults"
+        >
+          Reset
+        </button>
       </div>
 
       {/* Error toast – bottom left */}

@@ -24,7 +24,7 @@ public class SatelliteService {
     private static final int TLE_SEARCH_MAX_PAGES = 200;
 
     private static final List<String> INTERNET_SEARCH_TERMS = List.of(
-            "STARLINK", "ONEWEB", "KUIPER", "QIANFAN", "GUOWANG", "GALAXYSPACE", "E-SPACE"
+            "KUIPER", "QIANFAN", "GUOWANG", "GALAXYSPACE", "E-SPACE"
     );
 
     private static final Map<String, String> CUSTOM_TYPE_SEARCH_TERMS = Map.ofEntries(
@@ -230,6 +230,45 @@ public class SatelliteService {
                         .dataSource("celestrak")
                         .build();
             }
+
+                    // If group GP download is temporarily blocked, recover via CelesTrak table CATNR list + fast per-CATNR fetch.
+                    List<Integer> catalogNumbers = celestrakApiClient.getGroupCatalogNumbers(celestrakGroup);
+                    if (!catalogNumbers.isEmpty()) {
+                    int total = catalogNumbers.size();
+                    int from = Math.min((page - 1) * pageSize, total);
+                    int to = Math.min(from + pageSize, total);
+                    List<Integer> pageIds = from < to ? catalogNumbers.subList(from, to) : List.of();
+
+                    long now = System.currentTimeMillis();
+                    List<SatelliteListItemDto> items = pageIds.parallelStream()
+                        .map(id -> {
+                            Optional<CelestrakSatelliteDto> fast = celestrakApiClient.getSatelliteFast(id);
+                            if (fast.isEmpty()) {
+                            return null;
+                            }
+                            CelestrakSatelliteDto tle = fast.get();
+                            tleCache.putIfAbsent(id, new CachedTle(tle, now));
+                            return SatelliteListItemDto.builder()
+                                .satelliteId(id)
+                                .name(tle.getName())
+                                .tleDate(null)
+                                .type(celestrakGroup)
+                                .line1(tle.getLine1())
+                                .line2(tle.getLine2())
+                                .build();
+                        })
+                        .filter(Objects::nonNull)
+                        .toList();
+
+                    return SatelliteListResponseDto.builder()
+                        .satellites(items)
+                        .totalItems(total)
+                        .page(page)
+                        .pageSize(pageSize)
+                        .dataSource("celestrak-catalog")
+                        .build();
+                    }
+
             // CelesTrak unreachable/empty — fall through to TLE API search
             log.warn("CelesTrak group '{}' returned empty, falling back to TLE API search", celestrakGroup);
             String searchTerm = GROUP_SEARCH_TERMS.getOrDefault(celestrakGroup, celestrakGroup);
