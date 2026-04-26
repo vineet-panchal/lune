@@ -2,6 +2,7 @@ package com.lune.backend.satellite;
 
 import com.lune.backend.satellite.dto.PropagationResultDto;
 import com.lune.backend.satellite.dto.TleDto;
+import com.lune.backend.satellite.dto.TleListParameters;
 import com.lune.backend.satellite.dto.TleListResponseDto;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -11,6 +12,7 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
+import java.util.Collections;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
@@ -60,9 +62,21 @@ public class TleApiClient {
         try {
             return restTemplate.getForObject(uri, TleListResponseDto.class);
         } catch (Exception e) {
-            log.warn("TLE list request failed: {}", e.getMessage());
-            throw new SatelliteApiException("Failed to fetch satellite list", e);
+            log.warn("TLE list request failed for '{}': {}", uri, e.getMessage());
+            return emptyListResponse(page, cappedPageSize);
         }
+    }
+
+    private TleListResponseDto emptyListResponse(int page, int pageSize) {
+        TleListParameters parameters = new TleListParameters();
+        parameters.setPage(page);
+        parameters.setPageSize(pageSize);
+
+        TleListResponseDto dto = new TleListResponseDto();
+        dto.setTotalItems(0);
+        dto.setMember(Collections.emptyList());
+        dto.setParameters(parameters);
+        return dto;
     }
 
     /**
