@@ -16,10 +16,13 @@ import org.springframework.web.util.UriComponentsBuilder;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Component
 @RequiredArgsConstructor
@@ -33,23 +36,21 @@ public class CelestrakApiClient {
     private static final long GROUP_CACHE_TTL_MS = 3600_000; // 1 hour
     private static final int REQUEST_RETRIES = 1;
     private static final long RETRY_DELAY_MS = 250;
-    private static final long OUTAGE_BACKOFF_MS = 120_000;
+    private static final Pattern CATNR_LINK_PATTERN = Pattern.compile("gp\\.php\\?CATNR=(\\d+)&FORMAT=tle", Pattern.CASE_INSENSITIVE);
     private static final String USER_AGENT = "lune-backend/1.0 (satellite-tracker)";
 
     private final RestTemplate restTemplate;
-    private volatile long celestrakUnavailableUntilMs = 0;
 
     private record CachedGroup(List<CelestrakSatelliteDto> data, long fetchedAt) {}
+    private record CachedCatalogNumbers(List<Integer> data, long fetchedAt) {}
     private final Map<String, CachedGroup> groupCache = new ConcurrentHashMap<>();
+    private final Map<String, CachedCatalogNumbers> catalogNumbersCache = new ConcurrentHashMap<>();
 
     /**
      * Fetch satellites by CelesTrak group name (e.g. "STARLINK", "GPS-OPS", "STATIONS").
      * Returns an empty list on failure.
      */
     public List<CelestrakSatelliteDto> getGroup(String group) {
-        if (isTemporarilyUnavailable()) {
-            return List.of();
-        }
         String key = group.toUpperCase();
         CachedGroup cached = groupCache.get(key);
         if (cached != null && System.currentTimeMillis() - cached.fetchedAt() < GROUP_CACHE_TTL_MS) {
@@ -60,12 +61,27 @@ public class CelestrakApiClient {
             result = fetchGroupFromText(group);
         }
         if (!result.isEmpty()) {
-            markAvailable();
             groupCache.put(key, new CachedGroup(result, System.currentTimeMillis()));
-        } else {
-            markTemporarilyUnavailable();
         }
         return result;
+    }
+
+    /**
+     * Fetch a CelesTrak group's catalog numbers from the table endpoint.
+     * Used when GROUP GP downloads are temporarily unavailable but per-CATNR queries still work.
+     */
+    public List<Integer> getGroupCatalogNumbers(String group) {
+        String key = group.toUpperCase();
+        CachedCatalogNumbers cached = catalogNumbersCache.get(key);
+        if (cached != null && System.currentTimeMillis() - cached.fetchedAt() < GROUP_CACHE_TTL_MS) {
+            return cached.data();
+        }
+
+        List<Integer> parsed = fetchCatnrsFromTable(group);
+        if (!parsed.isEmpty()) {
+            catalogNumbersCache.put(key, new CachedCatalogNumbers(parsed, System.currentTimeMillis()));
+        }
+        return parsed;
     }
 
     /**
@@ -73,21 +89,35 @@ public class CelestrakApiClient {
      * Returns name, line1, line2 parsed from TLE text format.
      */
     public Optional<CelestrakSatelliteDto> getSatellite(int noradId) {
-        if (isTemporarilyUnavailable()) {
-            return Optional.empty();
-        }
         Optional<CelestrakSatelliteDto> fromJson = fetchSatelliteFromJson(noradId);
         if (fromJson.isPresent()) {
-            markAvailable();
             return fromJson;
         }
         Optional<CelestrakSatelliteDto> fromText = fetchSatelliteFromText(noradId);
-        if (fromText.isPresent()) {
-            markAvailable();
-        } else {
-            markTemporarilyUnavailable();
-        }
         return fromText;
+    }
+
+    /**
+     * Fast CATNR lookup path: use TLE text only (no JSON round-trip) to reduce per-item latency
+     * when hydrating large paged group catalogs.
+     */
+    public Optional<CelestrakSatelliteDto> getSatelliteFast(int noradId) {
+        String primaryBaseUrl = BASE_URLS.get(0);
+        URI uri = UriComponentsBuilder.fromUriString(primaryBaseUrl)
+                .queryParam("CATNR", noradId)
+                .queryParam("FORMAT", "TLE")
+                .build()
+                .toUri();
+        try {
+            String body = restTemplate.exchange(uri, HttpMethod.GET, new HttpEntity<>(buildHeaders()), String.class).getBody();
+            Optional<CelestrakSatelliteDto> parsed = parseTextTle(body, noradId);
+            if (parsed.isPresent()) {
+                return parsed;
+            }
+        } catch (Exception e) {
+            log.debug("CelesTrak fast CATNR fetch failed for {} via {}: {}", noradId, primaryBaseUrl, e.getMessage());
+        }
+        return Optional.empty();
     }
 
     private Optional<CelestrakSatelliteDto> fetchSatelliteFromJson(int noradId) {
@@ -208,6 +238,43 @@ public class CelestrakApiClient {
         return List.of();
     }
 
+    private List<Integer> fetchCatnrsFromTable(String group) {
+        for (String baseUrl : BASE_URLS) {
+            String tableUrl = baseUrl.replace("gp.php", "table.php");
+            URI uri = UriComponentsBuilder.fromUriString(tableUrl)
+                    .queryParam("GROUP", group.toUpperCase())
+                    .queryParam("FORMAT", "tle")
+                    .build()
+                    .toUri();
+            try {
+                String body = restTemplate.exchange(uri, HttpMethod.GET, new HttpEntity<>(buildHeaders()), String.class).getBody();
+                if (body == null || body.isBlank()) {
+                    continue;
+                }
+                List<Integer> parsed = parseCatnrsFromTableHtml(body);
+                if (!parsed.isEmpty()) {
+                    return parsed;
+                }
+            } catch (Exception e) {
+                log.debug("CelesTrak table CATNR fetch failed for '{}' via {}: {}", group, uri, e.getMessage());
+            }
+        }
+        return List.of();
+    }
+
+    private List<Integer> parseCatnrsFromTableHtml(String body) {
+        LinkedHashSet<Integer> catnrs = new LinkedHashSet<>();
+        Matcher matcher = CATNR_LINK_PATTERN.matcher(body);
+        while (matcher.find()) {
+            try {
+                catnrs.add(Integer.parseInt(matcher.group(1)));
+            } catch (NumberFormatException ignored) {
+                // Skip malformed IDs.
+            }
+        }
+        return List.copyOf(catnrs);
+    }
+
     private List<CelestrakSatelliteDto> parseTextGroup(String body) {
         if (body == null || body.isBlank()) {
             return List.of();
@@ -300,15 +367,4 @@ public class CelestrakApiClient {
         }
     }
 
-    private boolean isTemporarilyUnavailable() {
-        return System.currentTimeMillis() < celestrakUnavailableUntilMs;
-    }
-
-    private void markTemporarilyUnavailable() {
-        celestrakUnavailableUntilMs = System.currentTimeMillis() + OUTAGE_BACKOFF_MS;
-    }
-
-    private void markAvailable() {
-        celestrakUnavailableUntilMs = 0;
-    }
 }
