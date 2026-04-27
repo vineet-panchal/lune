@@ -35,10 +35,15 @@ type GlobeInstance = {
   backgroundColor: (c: string) => GlobeInstance;
   backgroundImageUrl: (url: string) => GlobeInstance;
   globeImageUrl: (url: string) => GlobeInstance;
+  bumpImageUrl: (url: string) => GlobeInstance;
+  showGlobe: (v: boolean) => GlobeInstance;
   showAtmosphere: (v: boolean) => GlobeInstance;
   atmosphereAltitude: (v: number) => GlobeInstance;
   atmosphereColor: (c: string) => GlobeInstance;
   showGraticules: (v: boolean) => GlobeInstance;
+  globeMaterial: () => any;
+  scene: () => THREE.Scene;
+  getGlobeRadius: () => number;
   pointsData: (d: any[]) => GlobeInstance;
   pointLat: (a: any) => GlobeInstance;
   pointLng: (a: any) => GlobeInstance;
@@ -75,6 +80,25 @@ type GlobeInstance = {
 
 const EARTH_RADIUS_KM = 6371;
 const INTERACTION_IDLE_MS = 220;
+
+const MAP_STYLES = ["default", "detail", "black", "white"] as const;
+type MapStyle = (typeof MAP_STYLES)[number];
+
+const SPACE_STYLES = ["default", "rich", "black"] as const;
+type SpaceStyle = (typeof SPACE_STYLES)[number];
+
+const MAP_STYLE_LABELS: Record<MapStyle, string> = {
+  default: "Default",
+  detail: "4K",
+  black: "Black",
+  white: "White",
+};
+
+const SPACE_STYLE_LABELS: Record<SpaceStyle, string> = {
+  default: "Default",
+  rich: "Stars",
+  black: "Black",
+};
 
 function getPropagationIntervalMs(count: number): number {
   if (count >= 6000) return 5000;
@@ -175,6 +199,39 @@ function generateStarfieldDataUrl(
   return canvas.toDataURL("image/png");
 }
 
+function createCloudTextureCanvas(width = 1024, height = 512, blobs = 72) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+
+  ctx.clearRect(0, 0, width, height);
+  for (let i = 0; i < blobs; i++) {
+    const centerX = Math.random() * width;
+    const centerY = Math.random() * height;
+    const radiusX = 18 + Math.random() * 70;
+    const radiusY = 10 + Math.random() * 28;
+    const alpha = 0.03 + Math.random() * 0.09;
+    const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+    gradient.addColorStop(0, `rgba(255,255,255,${alpha})`);
+    gradient.addColorStop(0.65, `rgba(255,255,255,${alpha * 0.55})`);
+    gradient.addColorStop(1, "rgba(255,255,255,0)");
+
+    ctx.save();
+    ctx.translate(centerX, centerY);
+    ctx.rotate((Math.random() - 0.5) * Math.PI * 0.7);
+    ctx.scale(radiusX, radiusY);
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(0, 0, 1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  return canvas;
+}
+
 export default function GlobeView() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const globeRef = useRef<GlobeInstance | null>(null);
@@ -201,14 +258,26 @@ export default function GlobeView() {
   const isUserInteractingRef = useRef(false);
   const interactionIdleTimerRef = useRef<number | null>(null);
   const lastUiUpdateAtRef = useRef(0);
+  const countryBordersRef = useRef<any[] | null>(null);
+  const cloudMeshRef = useRef<THREE.Mesh<THREE.SphereGeometry, THREE.MeshPhongMaterial> | null>(null);
+  const cloudAnimationFrameRef = useRef<number | null>(null);
 
   // Visualization control state
   const [isDayMode, setIsDayMode] = useState(false);
   const [showAtmosphere, setShowAtmosphere] = useState(true);
   const [showGraticules, setShowGraticules] = useState(true);
+  const [showBorders, setShowBorders] = useState(true);
+  const [showClouds, setShowClouds] = useState(false);
   const [atmosphereAltitude, setAtmosphereAltitude] = useState(0.15);
   const [atmosphereColor, setAtmosphereColor] = useState("rgba(100, 160, 255, 0.5)");
   const [rotationSpeed, setRotationSpeed] = useState(1);
+  const [mapStyle, setMapStyle] = useState<MapStyle>("default");
+  const [spaceStyle, setSpaceStyle] = useState<SpaceStyle>("default");
+  const [globeInitialized, setGlobeInitialized] = useState(false);
+  const [countryBordersReady, setCountryBordersReady] = useState(false);
+
+  const mapStyleLabel = MAP_STYLE_LABELS[mapStyle];
+  const spaceStyleLabel = SPACE_STYLE_LABELS[spaceStyle];
 
   const MAX_SELECTED = 10;
 
@@ -425,18 +494,15 @@ export default function GlobeView() {
         .then((r) => r.json())
         .then((worldData: Topology) => {
           const countries = feature(worldData, worldData.objects.countries as any);
-          globe
-            .polygonsData((countries as any).features)
-            .polygonCapColor(() => "rgba(0, 0, 0, 0)")
-            .polygonSideColor(() => "rgba(0, 0, 0, 0)")
-            .polygonStrokeColor(() => "rgba(140, 180, 255, 0.35)")
-            .polygonAltitude(() => 0.005);
+          countryBordersRef.current = (countries as any).features;
+          setCountryBordersReady(true);
         })
         .catch((e) => console.warn("Failed to load country borders", e));
 
       globe.pointOfView({ lat: 20, lng: 0, altitude: 2.2 }, 0);
 
       globeRef.current = globe;
+      setGlobeInitialized(true);
 
       // Initialize auto-rotation
       const controls = (globe as any).controls?.();
@@ -725,93 +791,262 @@ export default function GlobeView() {
   }, []);
 
   const toggleDayMode = useCallback(() => {
-    if (!globeRef.current) return;
-    const newDayMode = !isDayMode;
-    setIsDayMode(newDayMode);
-    
-    if (newDayMode) {
-      globeRef.current
-        .backgroundColor("#ffffff")
-        .backgroundImageUrl("")
-        .globeImageUrl("//unpkg.com/three-globe/example/img/earth-day.jpg")
-        .atmosphereColor("rgba(200, 200, 200, 0.3)");
-    } else {
-      const starBg = generateStarfieldDataUrl(2048, 1024, 4000);
-      globeRef.current
-        .backgroundColor("#000011")
-        .backgroundImageUrl(starBg)
-        .globeImageUrl("//unpkg.com/three-globe/example/img/earth-night.jpg")
-        .atmosphereColor(atmosphereColor);
-    }
-  }, [isDayMode, atmosphereColor]);
+    setIsDayMode((current) => !current);
+  }, []);
 
   const updateAtmosphere = useCallback((showAtmo: boolean) => {
-    if (!globeRef.current) return;
     setShowAtmosphere(showAtmo);
-    globeRef.current.showAtmosphere(showAtmo);
   }, []);
 
   const updateGraticules = useCallback((showGrat: boolean) => {
-    if (!globeRef.current) return;
     setShowGraticules(showGrat);
-    globeRef.current.showGraticules(showGrat);
+  }, []);
+
+  const toggleBorders = useCallback(() => {
+    setShowBorders((current) => !current);
+  }, []);
+
+  const cycleMapStyle = useCallback(() => {
+    setMapStyle((current) => {
+      const index = MAP_STYLES.indexOf(current);
+      return MAP_STYLES[(index + 1) % MAP_STYLES.length];
+    });
+  }, []);
+
+  const toggleClouds = useCallback(() => {
+    setShowClouds((current) => !current);
+  }, []);
+
+  const cycleSpaceStyle = useCallback(() => {
+    setSpaceStyle((current) => {
+      const index = SPACE_STYLES.indexOf(current);
+      return SPACE_STYLES[(index + 1) % SPACE_STYLES.length];
+    });
   }, []);
 
   const updateAtmosphereAltitude = useCallback((altitude: number) => {
-    if (!globeRef.current) return;
     setAtmosphereAltitude(altitude);
-    globeRef.current.atmosphereAltitude(altitude);
   }, []);
 
   const updateAtmosphereColorPreset = useCallback((color: string) => {
-    if (!globeRef.current || isDayMode) return;
+    if (isDayMode) return;
     setAtmosphereColor(color);
-    globeRef.current.atmosphereColor(color);
   }, [isDayMode]);
 
   const updateRotationSpeed = useCallback((speed: number) => {
-    if (!globeRef.current) return;
     setRotationSpeed(speed);
-    const controls = (globeRef.current as any).controls?.();
-    if (controls) {
-      if (speed === 0) {
-        controls.autoRotate = false;
-      } else {
-        controls.autoRotate = true;
-        controls.autoRotateSpeed = speed * 2;
-      }
-    }
   }, []);
 
   const resetVisualization = useCallback(() => {
-    if (!globeRef.current) return;
     setIsDayMode(false);
     setShowAtmosphere(true);
     setShowGraticules(true);
+    setShowBorders(true);
+    setShowClouds(false);
     setAtmosphereAltitude(0.15);
     setAtmosphereColor("rgba(100, 160, 255, 0.5)");
     setRotationSpeed(1);
-    
-    const starBg = generateStarfieldDataUrl(2048, 1024, 4000);
-    globeRef.current
-      .backgroundColor("#000011")
-      .backgroundImageUrl(starBg)
-      .globeImageUrl("//unpkg.com/three-globe/example/img/earth-night.jpg")
-      .showAtmosphere(true)
-      .atmosphereAltitude(0.15)
-      .atmosphereColor("rgba(100, 160, 255, 0.5)")
-      .showGraticules(true);
-    
-    const controls = (globeRef.current as any).controls?.();
-    if (controls) {
-      controls.autoRotate = true;
-      controls.autoRotateSpeed = 2;
-    }
+    setMapStyle("default");
+    setSpaceStyle("default");
   }, []);
 
+  useEffect(() => {
+    if (!globeInitialized || !globeRef.current) return;
+
+    const globe = globeRef.current;
+    const backgroundImage =
+      spaceStyle === "black"
+        ? ""
+        : spaceStyle === "rich"
+          ? generateStarfieldDataUrl(2048, 1024, 7000)
+          : isDayMode
+            ? ""
+            : generateStarfieldDataUrl(2048, 1024, 4000);
+
+    const backgroundColor =
+      spaceStyle === "black"
+        ? "#000000"
+        : spaceStyle === "rich"
+          ? "#000008"
+          : isDayMode
+            ? "#f8fbff"
+            : "#000011";
+
+    const globeImageUrl =
+      mapStyle === "detail"
+        ? "//unpkg.com/three-globe/example/img/earth-blue-marble.jpg"
+        : mapStyle === "black"
+          ? "//unpkg.com/three-globe/example/img/earth-topology.png"
+          : mapStyle === "white"
+            ? "//unpkg.com/three-globe/example/img/earth-topology.png"
+          : isDayMode
+            ? "//unpkg.com/three-globe/example/img/earth-day.jpg"
+            : "//unpkg.com/three-globe/example/img/earth-night.jpg";
+
+    globe
+      .backgroundColor(backgroundColor)
+      .backgroundImageUrl(backgroundImage)
+      .showGlobe(true)
+      .globeImageUrl(globeImageUrl)
+      .bumpImageUrl("//unpkg.com/three-globe/example/img/earth-topology.png")
+      .showAtmosphere(showAtmosphere)
+      .atmosphereAltitude(atmosphereAltitude)
+      .atmosphereColor(isDayMode ? "rgba(200, 200, 200, 0.3)" : atmosphereColor)
+      .showGraticules(showGraticules);
+
+    const globeMaterial = globe.globeMaterial?.();
+    if (globeMaterial) {
+      globeMaterial.color = new THREE.Color(
+        mapStyle === "white" ? "#f2f2ee" : mapStyle === "black" ? "#08090b" : "#ffffff"
+      );
+      globeMaterial.shininess = mapStyle === "detail" ? 16 : mapStyle === "white" ? 0 : mapStyle === "black" ? 3 : 10;
+      globeMaterial.bumpScale = mapStyle === "white" ? 14.5 : mapStyle === "black" ? 15.5 : mapStyle === "detail" ? 5 : 2;
+      globeMaterial.specular = new THREE.Color(
+        mapStyle === "white" ? "#4f4f4f" : mapStyle === "black" ? "#d0d0d0" : "#444444"
+      );
+      globeMaterial.emissive = new THREE.Color(mapStyle === "white" ? "#000000" : "#000000");
+      globeMaterial.emissiveIntensity = 0;
+    }
+
+    const polygons = countryBordersReady && showBorders ? countryBordersRef.current ?? [] : [];
+    globe
+      .polygonsData(polygons)
+      .polygonCapColor(() => "rgba(0, 0, 0, 0)")
+      .polygonSideColor(() => "rgba(0, 0, 0, 0)")
+      .polygonStrokeColor(() => {
+        if (mapStyle === "white") return "rgba(10, 10, 10, 0.94)";
+        if (mapStyle === "black") return "rgba(210, 210, 210, 0.82)";
+        return "rgba(140, 180, 255, 0.35)";
+      })
+      .polygonAltitude(() => 0.005);
+  }, [
+    atmosphereAltitude,
+    atmosphereColor,
+    countryBordersReady,
+    globeInitialized,
+    isDayMode,
+    mapStyle,
+    showAtmosphere,
+    showBorders,
+    showGraticules,
+    spaceStyle,
+  ]);
+
+  useEffect(() => {
+    if (!globeInitialized || !globeRef.current) return;
+
+    const controls = (globeRef.current as any).controls?.();
+    if (!controls) return;
+
+    controls.autoRotate = rotationSpeed > 0;
+    controls.autoRotateSpeed = rotationSpeed * 2;
+  }, [globeInitialized, rotationSpeed]);
+
+  useEffect(() => {
+    if (!globeInitialized || !globeRef.current) return;
+
+    const globe = globeRef.current;
+    const scene = globe.scene();
+
+    if (cloudAnimationFrameRef.current) {
+      window.cancelAnimationFrame(cloudAnimationFrameRef.current);
+      cloudAnimationFrameRef.current = null;
+    }
+
+    if (cloudMeshRef.current) {
+      scene.remove(cloudMeshRef.current);
+      cloudMeshRef.current.geometry.dispose();
+      cloudMeshRef.current.material.dispose();
+      cloudMeshRef.current = null;
+    }
+
+    if (!showClouds) return;
+
+    const cloudsTexture = new THREE.CanvasTexture(createCloudTextureCanvas());
+    cloudsTexture.needsUpdate = true;
+    const cloudsMesh = new THREE.Mesh(
+      new THREE.SphereGeometry(globe.getGlobeRadius() * 1.006, 75, 75),
+      new THREE.MeshPhongMaterial({ map: cloudsTexture, transparent: true, opacity: 0.62, depthWrite: false })
+    );
+
+    cloudsMesh.rotation.z = 0.25;
+    scene.add(cloudsMesh);
+    cloudMeshRef.current = cloudsMesh;
+
+    const rotateClouds = () => {
+      cloudsMesh.rotation.y -= 0.006;
+      cloudAnimationFrameRef.current = window.requestAnimationFrame(rotateClouds);
+    };
+
+    rotateClouds();
+
+    return () => {
+      if (cloudAnimationFrameRef.current) {
+        window.cancelAnimationFrame(cloudAnimationFrameRef.current);
+        cloudAnimationFrameRef.current = null;
+      }
+      if (cloudMeshRef.current) {
+        scene.remove(cloudMeshRef.current);
+        cloudMeshRef.current.geometry.dispose();
+        cloudMeshRef.current.material.map?.dispose();
+        cloudMeshRef.current.material.dispose();
+        cloudMeshRef.current = null;
+      }
+    };
+  }, [globeInitialized, showClouds]);
+
   return (
-    <div style={{ position: "relative", width: "100vw", height: "100vh" }}>
-      <GlobeCanvas containerRef={containerRef} />
+    <div style={{ position: "relative", width: "100vw", height: "100vh", overflow: "hidden" }}>
+      <div
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          inset: 0,
+          pointerEvents: "none",
+          zIndex: 0,
+          background:
+            spaceStyle === "black"
+              ? "radial-gradient(circle at 50% 35%, rgba(255,255,255,0.03), transparent 40%), #000"
+              : spaceStyle === "rich"
+                ? "radial-gradient(circle at 50% 38%, rgba(22, 35, 72, 0.42), transparent 36%), radial-gradient(circle at 15% 18%, rgba(255, 214, 120, 0.14), transparent 11%), radial-gradient(circle at 78% 28%, rgba(226, 239, 255, 0.18), transparent 9%)"
+                : "transparent",
+        }}
+      >
+        {spaceStyle === "rich" && (
+          <>
+            <div
+              style={{
+                position: "absolute",
+                top: "10%",
+                left: "12%",
+                width: 88,
+                height: 88,
+                borderRadius: "50%",
+                background: "radial-gradient(circle, rgba(255, 236, 171, 0.9) 0%, rgba(255, 182, 61, 0.54) 35%, rgba(255, 182, 61, 0.06) 68%, transparent 100%)",
+                filter: "blur(2px)",
+                boxShadow: "0 0 60px rgba(255, 186, 76, 0.45)",
+              }}
+            />
+            <div
+              style={{
+                position: "absolute",
+                top: "18%",
+                right: "14%",
+                width: 54,
+                height: 54,
+                borderRadius: "50%",
+                background: "radial-gradient(circle, rgba(240, 245, 255, 0.95) 0%, rgba(187, 205, 255, 0.52) 52%, rgba(187, 205, 255, 0.08) 76%, transparent 100%)",
+                filter: "blur(1px)",
+                boxShadow: "0 0 38px rgba(204, 220, 255, 0.28)",
+              }}
+            />
+          </>
+        )}
+      </div>
+
+      <div style={{ position: "relative", zIndex: 1, width: "100%", height: "100%" }}>
+        <GlobeCanvas containerRef={containerRef} />
+      </div>
 
       <LuneGlobePanel
         activePanel={activePanel}
@@ -869,12 +1104,20 @@ export default function GlobeView() {
         isDayMode={isDayMode}
         showAtmosphere={showAtmosphere}
         showGraticules={showGraticules}
+        showBorders={showBorders}
+        showClouds={showClouds}
+        mapStyleLabel={mapStyleLabel}
+        spaceStyleLabel={spaceStyleLabel}
         atmosphereAltitude={atmosphereAltitude}
         atmosphereColor={atmosphereColor}
         rotationSpeed={rotationSpeed}
         onToggleDayMode={toggleDayMode}
         onToggleAtmosphere={() => updateAtmosphere(!showAtmosphere)}
         onToggleGraticules={() => updateGraticules(!showGraticules)}
+        onToggleBorders={toggleBorders}
+        onCycleMapStyle={cycleMapStyle}
+        onToggleClouds={toggleClouds}
+        onCycleSpaceStyle={cycleSpaceStyle}
         onUpdateAtmosphereColorPreset={updateAtmosphereColorPreset}
         onUpdateAtmosphereAltitude={updateAtmosphereAltitude}
         onUpdateRotationSpeed={updateRotationSpeed}
