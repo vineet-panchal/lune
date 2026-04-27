@@ -65,6 +65,8 @@ export default function LuneGlobePanel({
         fontSize: 12,
         lineHeight: 1.4,
         maxWidth: 360,
+        zIndex: 11,
+        pointerEvents: "auto",
       }}
     >
       <div style={{ fontWeight: 700, marginBottom: 10 }}>Lune Globe</div>

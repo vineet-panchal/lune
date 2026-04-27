@@ -1,13 +1,36 @@
+"use client";
+
+import { useState } from "react";
+import type { IconType } from "react-icons";
+import {
+  MdAutoAwesome,
+  MdBlurOn,
+  MdBorderAll,
+  MdCloud,
+  MdGrid4X4,
+  MdNightlight,
+  MdPublic,
+  MdWbSunny,
+} from "react-icons/md";
+
 type VisualizationPanelProps = {
   isDayMode: boolean;
   showAtmosphere: boolean;
   showGraticules: boolean;
+  showBorders: boolean;
+  showClouds: boolean;
+  mapStyleLabel: string;
+  spaceStyleLabel: string;
   atmosphereAltitude: number;
   atmosphereColor: string;
   rotationSpeed: number;
   onToggleDayMode: () => void;
   onToggleAtmosphere: () => void;
   onToggleGraticules: () => void;
+  onToggleBorders: () => void;
+  onCycleMapStyle: () => void;
+  onToggleClouds: () => void;
+  onCycleSpaceStyle: () => void;
   onUpdateAtmosphereColorPreset: (color: string) => void;
   onUpdateAtmosphereAltitude: (value: number) => void;
   onUpdateRotationSpeed: (value: number) => void;
@@ -17,20 +40,100 @@ type VisualizationPanelProps = {
 const ATMOSPHERE_PRESETS = [
   { color: "rgba(100, 160, 255, 0.5)", label: "Blue" },
   { color: "rgba(100, 200, 255, 0.4)", label: "Cyan" },
+  { color: "rgba(255, 255, 255, 0.42)", label: "White" },
   { color: "rgba(150, 100, 255, 0.5)", label: "Purple" },
   { color: "rgba(255, 100, 150, 0.4)", label: "Pink" },
 ];
+
+const ICON_SIZE = 14;
+
+function ToolbarIconButton({
+  label,
+  active,
+  onClick,
+  Icon,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  Icon: IconType;
+}) {
+  const [isHovered, setIsHovered] = useState(false);
+
+  return (
+    <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+      {isHovered && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: "calc(100% + 8px)",
+            left: "50%",
+            transform: "translateX(-50%)",
+            padding: "4px 8px",
+            borderRadius: 999,
+            background: "rgba(8, 10, 18, 0.96)",
+            border: "1px solid rgba(255,255,255,0.16)",
+              color: "#d4dded",
+            fontSize: 10,
+            letterSpacing: 0.2,
+            whiteSpace: "nowrap",
+            pointerEvents: "none",
+            boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+            zIndex: 2,
+          }}
+        >
+          {label}
+        </div>
+      )}
+      <button
+        onClick={onClick}
+        onMouseEnter={() => setIsHovered(true)}
+        onMouseLeave={() => setIsHovered(false)}
+        onFocus={() => setIsHovered(true)}
+        onBlur={() => setIsHovered(false)}
+        aria-label={label}
+        title={label}
+        style={{
+          width: 32,
+          height: 32,
+          borderRadius: 9,
+          background: active ? "rgba(111, 142, 201, 0.18)" : "rgba(173, 189, 220, 0.08)",
+          border: `1px solid ${active ? "rgba(133, 165, 230, 0.42)" : "rgba(154, 171, 199, 0.22)"}`,
+          color: active ? "#c5d5f1" : "rgba(180, 195, 222, 0.92)",
+          cursor: "pointer",
+          display: "grid",
+          placeItems: "center",
+          transition: "transform 0.16s ease, border-color 0.16s ease, background 0.16s ease, color 0.16s ease",
+          boxShadow: active
+            ? "inset 0 0 0 1px rgba(170, 193, 236, 0.16), 0 2px 10px rgba(0,0,0,0.18)"
+            : "inset 0 0 0 1px rgba(255,255,255,0.02)",
+        }}
+        onMouseDown={(event) => event.preventDefault()}
+      >
+        <Icon size={ICON_SIZE} aria-hidden="true" />
+      </button>
+    </div>
+  );
+}
 
 export default function VisualizationPanel({
   isDayMode,
   showAtmosphere,
   showGraticules,
+  showBorders,
+  showClouds,
+  mapStyleLabel,
+  spaceStyleLabel,
   atmosphereAltitude,
   atmosphereColor,
   rotationSpeed,
   onToggleDayMode,
   onToggleAtmosphere,
   onToggleGraticules,
+  onToggleBorders,
+  onCycleMapStyle,
+  onToggleClouds,
+  onCycleSpaceStyle,
   onUpdateAtmosphereColorPreset,
   onUpdateAtmosphereAltitude,
   onUpdateRotationSpeed,
@@ -63,61 +166,56 @@ export default function VisualizationPanel({
 
       <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.15)" }} />
 
-      <button
-        onClick={onToggleDayMode}
-        style={{
-          padding: "6px 12px",
-          borderRadius: 6,
-          background: isDayMode ? "rgba(255,193,7,0.3)" : "rgba(100,160,255,0.2)",
-          border: `1px solid ${isDayMode ? "rgba(255,193,7,0.5)" : "rgba(100,160,255,0.3)"}`,
-          color: isDayMode ? "#ffc107" : "#64a0ff",
-          cursor: "pointer",
-          fontSize: 11,
-          fontFamily: "inherit",
-          fontWeight: 600,
-          transition: "all 0.2s ease",
-          whiteSpace: "nowrap",
-        }}
-        title={isDayMode ? "Switch to Night Mode" : "Switch to Day Mode"}
-      >
-        {isDayMode ? "☀️ Day" : "🌙 Night"}
-      </button>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <ToolbarIconButton
+          label={isDayMode ? "Day" : "Night"}
+          active
+          onClick={onToggleDayMode}
+          Icon={isDayMode ? MdWbSunny : MdNightlight}
+        />
 
-      <button
-        onClick={onToggleAtmosphere}
-        style={{
-          padding: "6px 12px",
-          borderRadius: 6,
-          background: showAtmosphere ? "rgba(100,160,255,0.2)" : "rgba(100,100,100,0.2)",
-          border: `1px solid ${showAtmosphere ? "rgba(100,160,255,0.3)" : "rgba(100,100,100,0.3)"}`,
-          color: showAtmosphere ? "#64a0ff" : "rgba(255,255,255,0.4)",
-          cursor: "pointer",
-          fontSize: 11,
-          fontFamily: "inherit",
-          whiteSpace: "nowrap",
-        }}
-        title={showAtmosphere ? "Hide Atmosphere" : "Show Atmosphere"}
-      >
-        {showAtmosphere ? "✓" : ""} Atmosphere
-      </button>
+        <ToolbarIconButton
+          label="Atmosphere"
+          active={showAtmosphere}
+          onClick={onToggleAtmosphere}
+          Icon={MdBlurOn}
+        />
 
-      <button
-        onClick={onToggleGraticules}
-        style={{
-          padding: "6px 12px",
-          borderRadius: 6,
-          background: showGraticules ? "rgba(100,160,255,0.2)" : "rgba(100,100,100,0.2)",
-          border: `1px solid ${showGraticules ? "rgba(100,160,255,0.3)" : "rgba(100,100,100,0.3)"}`,
-          color: showGraticules ? "#64a0ff" : "rgba(255,255,255,0.4)",
-          cursor: "pointer",
-          fontSize: 11,
-          fontFamily: "inherit",
-          whiteSpace: "nowrap",
-        }}
-        title={showGraticules ? "Hide Grid" : "Show Grid"}
-      >
-        {showGraticules ? "✓" : ""} Grid
-      </button>
+        <ToolbarIconButton
+          label={showGraticules ? "Lat/Lon Off" : "Lat/Lon On"}
+          active={showGraticules}
+          onClick={onToggleGraticules}
+          Icon={MdGrid4X4}
+        />
+
+        <ToolbarIconButton
+          label={showBorders ? "Borders Off" : "Borders On"}
+          active={showBorders}
+          onClick={onToggleBorders}
+          Icon={MdBorderAll}
+        />
+
+        <ToolbarIconButton
+          label={`Map Style: ${mapStyleLabel}`}
+          active
+          onClick={onCycleMapStyle}
+          Icon={MdPublic}
+        />
+
+        <ToolbarIconButton
+          label={showClouds ? "Clouds Off" : "Clouds On"}
+          active={showClouds}
+          onClick={onToggleClouds}
+          Icon={MdCloud}
+        />
+
+        <ToolbarIconButton
+          label={`Space Style: ${spaceStyleLabel}`}
+          active
+          onClick={onCycleSpaceStyle}
+          Icon={MdAutoAwesome}
+        />
+      </div>
 
       {!isDayMode && (
         <>
@@ -186,13 +284,13 @@ export default function VisualizationPanel({
       <button
         onClick={onResetVisualization}
         style={{
-          padding: "6px 10px",
-          borderRadius: 6,
+          padding: "4px 8px",
+          borderRadius: 5,
           background: "rgba(255,255,255,0.08)",
           border: "1px solid rgba(255,255,255,0.2)",
           color: "rgba(255,255,255,0.6)",
           cursor: "pointer",
-          fontSize: 11,
+          fontSize: 10,
           fontFamily: "inherit",
           whiteSpace: "nowrap",
         }}
