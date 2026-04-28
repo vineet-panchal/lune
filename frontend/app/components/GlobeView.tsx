@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { fetchSatellites } from "../lib/api";
+import { fetchKMeansClusters, fetchSatellites } from "../lib/api";
 import * as satellite from "satellite.js";
 import * as THREE from "three";
 import { feature } from "topojson-client";
@@ -9,6 +9,7 @@ import type { Topology } from "topojson-specification";
 import GlobeCanvas from "./globe/GlobeCanvas";
 import Navbar from "./layout/Navbar";
 import LuneGlobePanel from "./panels/LuneGlobePanel";
+import OrbitalAnalyticsPanel from "./panels/OrbitalAnalyticsPanel";
 import OrbitalViewPanel from "./panels/OrbitalViewPanel";
 import SelectedSatellitesPanel from "./panels/SelectedSatellitesPanel";
 import VisualizationPanel from "./panels/VisualizationPanel";
@@ -28,6 +29,8 @@ type SatTle = {
   name: string;
   satrec: satellite.SatRec;
 };
+
+type GlobeTaggedObject3D = THREE.Object3D & { __globeObjType?: string };
 
 type GlobeInstance = {
   width: (w: number) => GlobeInstance;
@@ -133,6 +136,25 @@ function altitudeToColor(altKm: number): string {
   return ALTITUDE_BANDS[ALTITUDE_BANDS.length - 1].color;
 }
 
+const ANALYTICS_PANEL_WIDTH_PX = 392;
+
+const CLUSTER_PALETTE = [
+  "#4fc3f7",
+  "#81c784",
+  "#ffd54f",
+  "#ff8a65",
+  "#f06292",
+  "#ba68c8",
+  "#90a4ae",
+  "#fff176",
+];
+
+export type GlobeViewMode = "satellite-tracker" | "orbital-intelligence";
+
+type GlobeViewProps = {
+  mode?: GlobeViewMode;
+};
+
 /** Propagate a satrec to geodetic lat/lng/alt at a given Date using satellite.js */
 function propagateToGeodetic(satrec: satellite.SatRec, date: Date): { lat: number; lng: number; alt: number } | null {
   const posVel = satellite.propagate(satrec, date);
@@ -143,6 +165,18 @@ function propagateToGeodetic(satrec: satellite.SatRec, date: Date): { lat: numbe
     lat: satellite.degreesLat(geo.latitude),
     lng: satellite.degreesLong(geo.longitude),
     alt: geo.height, // km above Earth surface
+  };
+}
+
+function geodeticToCartesianKm(latDeg: number, lngDeg: number, altKm: number): { x: number; y: number; z: number } {
+  const lat = (latDeg * Math.PI) / 180;
+  const lng = (lngDeg * Math.PI) / 180;
+  const radius = EARTH_RADIUS_KM + Math.max(0, altKm);
+  const cosLat = Math.cos(lat);
+  return {
+    x: radius * cosLat * Math.cos(lng),
+    y: radius * Math.sin(lat),
+    z: radius * cosLat * Math.sin(lng),
   };
 }
 
@@ -232,9 +266,11 @@ function createCloudTextureCanvas(width = 1024, height = 512, blobs = 72) {
   return canvas;
 }
 
-export default function GlobeView() {
+export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const globeRef = useRef<GlobeInstance | null>(null);
+  const clusterBySatIdRef = useRef<Map<number, number> | null>(null);
+  const propagateAllRef = useRef<(tles: SatTle[], forceUiUpdate?: boolean) => void>(() => {});
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [satellites, setSatellites] = useState<Sat[]>([]);
   const [satType, setSatType] = useState<string>("Popular");
@@ -275,6 +311,13 @@ export default function GlobeView() {
   const [spaceStyle, setSpaceStyle] = useState<SpaceStyle>("default");
   const [globeInitialized, setGlobeInitialized] = useState(false);
   const [countryBordersReady, setCountryBordersReady] = useState(false);
+  const [clusterSummary, setClusterSummary] = useState<{
+    k: number;
+    inertia: number | null;
+    sizes: Record<number, number>;
+  } | null>(null);
+  const [clusterError, setClusterError] = useState<string | null>(null);
+  const [clusteringBusy, setClusteringBusy] = useState(false);
 
   const mapStyleLabel = MAP_STYLE_LABELS[mapStyle];
   const spaceStyleLabel = SPACE_STYLE_LABELS[spaceStyle];
@@ -499,7 +542,12 @@ export default function GlobeView() {
         })
         .catch((e) => console.warn("Failed to load country borders", e));
 
-      globe.pointOfView({ lat: 20, lng: 0, altitude: 2.2 }, 0);
+      globe.pointOfView(
+        mode === "orbital-intelligence"
+          ? { lat: 18, lng: -28, altitude: 3.35 }
+          : { lat: 20, lng: 0, altitude: 2.2 },
+        0
+      );
 
       globeRef.current = globe;
       setGlobeInitialized(true);
@@ -568,6 +616,7 @@ export default function GlobeView() {
     init();
 
     return () => {};
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- globe init once per mount; mode is fixed per route
   }, []);
 
   // Fetch satellite TLEs once, then propagate positions client-side every second.
@@ -584,6 +633,9 @@ export default function GlobeView() {
     orbitPathsRef.current = [];
     setSelectedSats([]);
     setOrbitPaths([]);
+    clusterBySatIdRef.current = null;
+    setClusterSummary(null);
+    setClusterError(null);
 
     // Clean up any search propagation timer
     if (searchPropTimerRef.current) {
@@ -621,13 +673,19 @@ export default function GlobeView() {
         const s = tles[i];
         const geo = propagateToGeodetic(s.satrec, now);
         if (geo) {
+          const clusterMap = clusterBySatIdRef.current;
+          const cid = clusterMap?.get(s.satelliteId);
+          const color =
+            cid !== undefined && cid !== null
+              ? CLUSTER_PALETTE[Math.abs(cid) % CLUSTER_PALETTE.length]
+              : altitudeToColor(geo.alt ?? 0);
           const satPoint = {
             satelliteId: s.satelliteId,
             name: s.name,
             latitude: geo.lat,
             longitude: geo.lng,
             altitudeKm: geo.alt,
-            color: altitudeToColor(geo.alt ?? 0),
+            color,
           };
           points.push(satPoint);
           if (shouldUpdateUi) {
@@ -650,6 +708,7 @@ export default function GlobeView() {
         }
         if (globeRef.current) globeRef.current.objectsData(points);
       }
+      propagateAllRef.current = propagateAll;
     }
 
     async function fetchTles() {
@@ -754,6 +813,58 @@ export default function GlobeView() {
     orbitPathsRef.current = [];
     setSelectedSats([]);
     setOrbitPaths([]);
+  }, []);
+
+  const runKMeans = useCallback(async (k: number) => {
+    const tles = satTlesRef.current;
+    if (tles.length < 2 || k < 2) return;
+    setClusteringBusy(true);
+    setClusterError(null);
+    try {
+      const now = new Date();
+      const points = tles.map((t) => {
+        const geo = propagateToGeodetic(t.satrec, now);
+        if (!geo) return null;
+        const xyz = geodeticToCartesianKm(geo.lat, geo.lng, geo.alt);
+        return {
+          satelliteId: t.satelliteId,
+          name: t.name,
+          // Keep the existing API field names for compatibility; values are XYZ position-space features.
+          altitudeKm: xyz.x,
+          inclinationDeg: xyz.y,
+          meanMotionRpd: xyz.z,
+        };
+      }).filter((p): p is NonNullable<typeof p> => Boolean(p));
+      if (points.length < 2) {
+        throw new Error("Not enough propagated points available for clustering right now.");
+      }
+      const resp = await fetchKMeansClusters({ k: Math.min(k, points.length), points });
+      const map = new Map<number, number>();
+      points.forEach((p, i) => map.set(p.satelliteId, resp.labels[i] ?? 0));
+      clusterBySatIdRef.current = map;
+      const sizes: Record<number, number> = {};
+      resp.labels.forEach((label) => {
+        sizes[label] = (sizes[label] ?? 0) + 1;
+      });
+      setClusterSummary({
+        k: resp.nClusters,
+        inertia: resp.inertia ?? null,
+        sizes,
+      });
+      propagateAllRef.current(tles, true);
+    } catch (e) {
+      console.error(e);
+      setClusterError(e instanceof Error ? e.message : "Clustering request failed");
+    } finally {
+      setClusteringBusy(false);
+    }
+  }, []);
+
+  const clearClustering = useCallback(() => {
+    clusterBySatIdRef.current = null;
+    setClusterSummary(null);
+    setClusterError(null);
+    propagateAllRef.current(satTlesRef.current, true);
   }, []);
 
   const handleSearchSelect = useCallback((sat: any) => {
@@ -995,8 +1106,72 @@ export default function GlobeView() {
     };
   }, [globeInitialized, showClouds]);
 
+  useEffect(() => {
+    if (!globeInitialized || !globeRef.current) return;
+
+    const scene = globeRef.current.scene();
+    const axes = new THREE.AxesHelper(340);
+    const grid = new THREE.GridHelper(720, 36, 0x556f8f, 0x1c2330);
+    const gridMat = grid.material;
+    if (!Array.isArray(gridMat)) {
+      gridMat.transparent = true;
+      gridMat.opacity = 0.42;
+    } else {
+      gridMat.forEach((m) => {
+        m.transparent = true;
+        m.opacity = 0.42;
+      });
+    }
+
+    if (mode !== "orbital-intelligence") {
+      scene.traverse((obj) => {
+        const o = obj as GlobeTaggedObject3D;
+        if (o.__globeObjType === "globe") {
+          o.scale.setScalar(1);
+        }
+      });
+      return () => {};
+    }
+
+    scene.add(axes);
+    scene.add(grid);
+    scene.traverse((obj) => {
+      const o = obj as GlobeTaggedObject3D;
+      if (o.__globeObjType === "globe") {
+        o.scale.setScalar(0.22);
+      }
+    });
+
+    return () => {
+      scene.remove(axes);
+      scene.remove(grid);
+      axes.geometry.dispose();
+      (axes.material as THREE.Material).dispose();
+      grid.geometry.dispose();
+      const gm = grid.material;
+      if (Array.isArray(gm)) gm.forEach((m) => m.dispose());
+      else gm.dispose();
+
+      scene.traverse((obj) => {
+        const o = obj as GlobeTaggedObject3D;
+        if (o.__globeObjType === "globe") {
+          o.scale.setScalar(1);
+        }
+      });
+    };
+  }, [globeInitialized, mode]);
+
   return (
-    <div style={{ position: "relative", width: "100vw", height: "100vh", overflow: "hidden" }}>
+    <div
+      style={{
+        position: "relative",
+        width: "100vw",
+        height: "100vh",
+        overflow: "hidden",
+        paddingRight: mode === "orbital-intelligence" ? ANALYTICS_PANEL_WIDTH_PX : 0,
+        boxSizing: "border-box",
+      }}
+    >
       <div
         aria-hidden="true"
         style={{
@@ -1085,22 +1260,39 @@ export default function GlobeView() {
         loading={loading}
       />
 
-      <Navbar />
+      <Navbar current={mode === "orbital-intelligence" ? "orbital-intelligence" : "satellite-tracker"} />
 
       <SelectedSatellitesPanel
+        rightInsetPx={mode === "orbital-intelligence" ? ANALYTICS_PANEL_WIDTH_PX : 0}
         selectedSats={selectedSats}
         maxSelected={MAX_SELECTED}
         onRemoveSat={removeSat}
         onClearAll={clearAll}
       />
 
-      <OrbitalViewPanel
-        altitudeBands={ALTITUDE_BANDS}
-        satellites={satellites}
-        satCount={satCount}
-      />
+      {mode === "satellite-tracker" && (
+        <OrbitalViewPanel
+          altitudeBands={ALTITUDE_BANDS}
+          satellites={satellites}
+          satCount={satCount}
+        />
+      )}
+
+      {mode === "orbital-intelligence" && (
+        <OrbitalAnalyticsPanel
+          satelliteSampleCount={satellites.length}
+          satelliteTotalCount={satCount}
+          loadingCatalog={loading}
+          clusteringBusy={clusteringBusy}
+          clusterError={clusterError}
+          clusterSummary={clusterSummary}
+          onRunKMeans={(k) => void runKMeans(k)}
+          onClearClustering={clearClustering}
+        />
+      )}
 
       <VisualizationPanel
+        rightGutterPx={mode === "orbital-intelligence" ? ANALYTICS_PANEL_WIDTH_PX : 0}
         isDayMode={isDayMode}
         showAtmosphere={showAtmosphere}
         showGraticules={showGraticules}

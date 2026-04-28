@@ -1,0 +1,12 @@
+# Python analytics service artifacts
+analytics-service/.venv/
+analytics-service/venv/
+analytics-service/__pycache__/
+analytics-service/.pytest_cache/
+analytics-service/.mypy_cache/
+analytics-service/.ruff_cache/
+analytics-service/.ipynb_checkpoints/
+analytics-service/*.py[cod]
+analytics-service/.python-version
+analytics-service/.env
+analytics-service/.env.*

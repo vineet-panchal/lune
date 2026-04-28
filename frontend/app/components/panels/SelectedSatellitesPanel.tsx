@@ -6,6 +6,8 @@ type SelectedSat = {
 };
 
 type SelectedSatellitesPanelProps = {
+  /** Push panel left when a full-height right sidebar is present (e.g. Orbital Intelligence). */
+  rightInsetPx?: number;
   selectedSats: SelectedSat[];
   maxSelected: number;
   onRemoveSat: (id: number) => void;
@@ -13,6 +15,7 @@ type SelectedSatellitesPanelProps = {
 };
 
 export default function SelectedSatellitesPanel({
+  rightInsetPx = 0,
   selectedSats,
   maxSelected,
   onRemoveSat,
@@ -25,7 +28,7 @@ export default function SelectedSatellitesPanel({
       style={{
         position: "absolute",
         top: 12,
-        right: 12,
+        right: 12 + Math.max(0, rightInsetPx),
         padding: "10px 14px",
         borderRadius: 10,
         background: "rgba(0,0,0,0.65)",

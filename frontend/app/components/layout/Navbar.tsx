@@ -1,4 +1,28 @@
-export default function Navbar() {
+import type { CSSProperties } from "react";
+import Link from "next/link";
+
+export type NavbarPage = "satellite-tracker" | "orbital-intelligence";
+
+type NavbarProps = {
+  current: NavbarPage;
+};
+
+function navButtonStyle(active: boolean): CSSProperties {
+  return {
+    background: active ? "rgba(255,255,255,0.12)" : "transparent",
+    border: active ? "1px solid rgba(255,255,255,0.25)" : "1px solid rgba(255,255,255,0.08)",
+    color: active ? "#fff" : "rgba(255,255,255,0.78)",
+    padding: "4px 12px",
+    borderRadius: 6,
+    fontSize: 12,
+    cursor: active ? "default" : "pointer",
+    fontFamily: "inherit",
+    textDecoration: "none",
+    display: "inline-block",
+  };
+}
+
+export default function Navbar({ current }: NavbarProps) {
   return (
     <div
       style={{
@@ -29,23 +53,20 @@ export default function Navbar() {
         }}
       />
       <div style={{ display: "flex", gap: 6 }}>
-        <button
-          style={{
-            background: "rgba(255,255,255,0.12)",
-            border: "1px solid rgba(255,255,255,0.25)",
-            color: "#fff",
-            padding: "4px 12px",
-            borderRadius: 6,
-            fontSize: 12,
-            cursor: "default",
-            fontFamily: "inherit",
-          }}
-        >
+        <Link href="/" prefetch style={navButtonStyle(current === "satellite-tracker")}>
           Satellite Tracker
-        </button>
+        </Link>
+        <Link
+          href="/orbital-intelligence"
+          prefetch
+          style={navButtonStyle(current === "orbital-intelligence")}
+        >
+          Orbital Intelligence
+        </Link>
         {["Constellations", "News", "Trips"].map((label) => (
           <button
             key={label}
+            type="button"
             disabled
             style={{
               background: "transparent",
