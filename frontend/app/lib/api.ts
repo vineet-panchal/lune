@@ -86,3 +86,39 @@ export async function planTrajectory(body: {
   if (!res.ok) throw new Error(`Trajectory plan: ${res.status}`);
   return res.json();
 }
+
+export type ClusteringFeaturePoint = {
+  satelliteId: number;
+  name: string;
+  altitudeKm: number;
+  inclinationDeg: number;
+  meanMotionRpd: number;
+};
+
+export type KMeansClusterResponse = {
+  labels: number[];
+  nClusters: number;
+  inertia: number | null;
+};
+
+export async function fetchKMeansClusters(body: {
+  k: number;
+  points: ClusteringFeaturePoint[];
+}): Promise<KMeansClusterResponse> {
+  const res = await fetch(`${API_BASE}/api/analytics/cluster`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let msg = `Clustering failed (${res.status})`;
+    try {
+      const j = await res.json();
+      if (j && typeof j.error === "string") msg = j.error;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  return res.json();
+}

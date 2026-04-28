@@ -14,6 +14,8 @@ import {
 } from "react-icons/md";
 
 type VisualizationPanelProps = {
+  /** Extra space reserved on the right (e.g. full-height analytics panel). */
+  rightGutterPx?: number;
   isDayMode: boolean;
   showAtmosphere: boolean;
   showGraticules: boolean;
@@ -117,6 +119,7 @@ function ToolbarIconButton({
 }
 
 export default function VisualizationPanel({
+  rightGutterPx = 0,
   isDayMode,
   showAtmosphere,
   showGraticules,
@@ -139,6 +142,7 @@ export default function VisualizationPanel({
   onUpdateRotationSpeed,
   onResetVisualization,
 }: VisualizationPanelProps) {
+  const gutter = Math.max(0, rightGutterPx);
   return (
     <div
       style={{
@@ -157,7 +161,7 @@ export default function VisualizationPanel({
         gap: 12,
         alignItems: "center",
         flexWrap: "wrap",
-        maxWidth: "calc(100vw - 32px)",
+        maxWidth: `calc(100vw - 32px - ${gutter}px)`,
       }}
     >
       <div style={{ fontWeight: 700, fontSize: 12, letterSpacing: 0.3, minWidth: "fit-content" }}>
