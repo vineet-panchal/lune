@@ -12,7 +12,8 @@ import {
   planTrajectory,
 } from "../lib/api";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+const API_BASE_DISPLAY =
+  process.env.NEXT_PUBLIC_API_URL?.trim() || "(same-origin /api → Next rewrites to Spring)";
 
 export default function ApiCalls() {
   const [status, setStatus] = useState<string[]>([]);
@@ -68,7 +69,7 @@ export default function ApiCalls() {
   return (
     <div style={{ padding: 16, fontFamily: "monospace", fontSize: 12 }}>
       <p style={{ marginBottom: 8, fontWeight: 600 }}>
-        Backend: {API_BASE}
+        Backend: {API_BASE_DISPLAY}
       </p>
       <p style={{ marginBottom: 8, color: "#666" }}>
         To see these requests in DevTools: Network tab → filter by <strong>Fetch/XHR</strong> (not &quot;All&quot;).

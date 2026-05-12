@@ -1,7 +1,17 @@
 import type { NextConfig } from "next";
 
+/** Where the Spring Boot server runs (Next dev server proxies /api/* here). */
+const backendUrl = process.env.BACKEND_URL ?? "http://127.0.0.1:8080";
+
 const nextConfig: NextConfig = {
-  /* config options here */
+  async rewrites() {
+    return [
+      {
+        source: "/api/:path*",
+        destination: `${backendUrl}/api/:path*`,
+      },
+    ];
+  },
 };
 
 export default nextConfig;

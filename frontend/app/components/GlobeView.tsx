@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { fetchKMeansClusters, fetchSatellites } from "../lib/api";
+import { fetchClusterAnalytics, fetchSatellites } from "../lib/api";
 import * as satellite from "satellite.js";
 import * as THREE from "three";
 import { feature } from "topojson-client";
@@ -9,7 +9,11 @@ import type { Topology } from "topojson-specification";
 import GlobeCanvas from "./globe/GlobeCanvas";
 import Navbar from "./layout/Navbar";
 import LuneGlobePanel from "./panels/LuneGlobePanel";
-import OrbitalAnalyticsPanel from "./panels/OrbitalAnalyticsPanel";
+import OrbitalAnalyticsPanel, {
+  type ClusterAlgorithm,
+  type ClusterRunPayload,
+  type ClusterSummary,
+} from "./panels/OrbitalAnalyticsPanel";
 import OrbitalViewPanel from "./panels/OrbitalViewPanel";
 import SelectedSatellitesPanel from "./panels/SelectedSatellitesPanel";
 import VisualizationPanel from "./panels/VisualizationPanel";
@@ -149,6 +153,26 @@ const CLUSTER_PALETTE = [
   "#fff176",
 ];
 
+function clusterLabelToColor(label: number, algorithm: ClusterAlgorithm | null): string {
+  if (algorithm === "dbscan" && label === -1) return "#78909c";
+  if (algorithm === "isolation_forest") {
+    if (label === -1) return "#ff6e6e";
+    return "#69f0ae";
+  }
+  return CLUSTER_PALETTE[Math.abs(label) % CLUSTER_PALETTE.length];
+}
+
+function formatClusterParamsLine(payload: ClusterRunPayload): string {
+  switch (payload.algorithm) {
+    case "kmeans":
+      return `k = ${payload.k}`;
+    case "dbscan":
+      return `eps = ${payload.eps.toFixed(2)}, min_samples = ${payload.minSamples}`;
+    case "isolation_forest":
+      return `contamination ≈ ${(100 * payload.contamination).toFixed(1)}%`;
+  }
+}
+
 export type GlobeViewMode = "satellite-tracker" | "orbital-intelligence";
 
 type GlobeViewProps = {
@@ -270,6 +294,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
   const containerRef = useRef<HTMLDivElement | null>(null);
   const globeRef = useRef<GlobeInstance | null>(null);
   const clusterBySatIdRef = useRef<Map<number, number> | null>(null);
+  const clusterAlgorithmRef = useRef<ClusterAlgorithm | null>(null);
   const propagateAllRef = useRef<(tles: SatTle[], forceUiUpdate?: boolean) => void>(() => {});
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [satellites, setSatellites] = useState<Sat[]>([]);
@@ -311,11 +336,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
   const [spaceStyle, setSpaceStyle] = useState<SpaceStyle>("default");
   const [globeInitialized, setGlobeInitialized] = useState(false);
   const [countryBordersReady, setCountryBordersReady] = useState(false);
-  const [clusterSummary, setClusterSummary] = useState<{
-    k: number;
-    inertia: number | null;
-    sizes: Record<number, number>;
-  } | null>(null);
+  const [clusterSummary, setClusterSummary] = useState<ClusterSummary | null>(null);
   const [clusterError, setClusterError] = useState<string | null>(null);
   const [clusteringBusy, setClusteringBusy] = useState(false);
 
@@ -634,6 +655,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     setSelectedSats([]);
     setOrbitPaths([]);
     clusterBySatIdRef.current = null;
+    clusterAlgorithmRef.current = null;
     setClusterSummary(null);
     setClusterError(null);
 
@@ -675,9 +697,10 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
         if (geo) {
           const clusterMap = clusterBySatIdRef.current;
           const cid = clusterMap?.get(s.satelliteId);
+          const algo = clusterAlgorithmRef.current;
           const color =
             cid !== undefined && cid !== null
-              ? CLUSTER_PALETTE[Math.abs(cid) % CLUSTER_PALETTE.length]
+              ? clusterLabelToColor(cid, algo)
               : altitudeToColor(geo.alt ?? 0);
           const satPoint = {
             satelliteId: s.satelliteId,
@@ -753,7 +776,22 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
       }
     }
 
-    fetchTles().catch((e) => console.error("Failed to load satellites", e));
+    fetchTles().catch((e) => {
+      const message = e instanceof Error ? e.message : String(e);
+      const loaded = satTlesRef.current.length;
+      if (loaded > 0) {
+        // e.g. page 2+ returned 5xx while page 1 already populated the globe — not a hard failure.
+        console.warn(
+          `[GlobeView] Satellite catalog fetch stopped early (${loaded} in memory, expected more):`,
+          message
+        );
+        return;
+      }
+      console.warn("[GlobeView] Satellite catalog failed:", message);
+      setLoading(false);
+      setErrorMsg(message);
+      setTimeout(() => setErrorMsg(null), 8000);
+    });
     return () => {
       aborted = true;
       if (propagateTimer) window.clearTimeout(propagateTimer);
@@ -815,9 +853,10 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     setOrbitPaths([]);
   }, []);
 
-  const runKMeans = useCallback(async (k: number) => {
+  const runClustering = useCallback(async (payload: ClusterRunPayload) => {
     const tles = satTlesRef.current;
-    if (tles.length < 2 || k < 2) return;
+    if (tles.length < 2) return;
+    if (payload.algorithm === "kmeans" && payload.k < 2) return;
     setClusteringBusy(true);
     setClusterError(null);
     try {
@@ -838,18 +877,44 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
       if (points.length < 2) {
         throw new Error("Not enough propagated points available for clustering right now.");
       }
-      const resp = await fetchKMeansClusters({ k: Math.min(k, points.length), points });
+
+      const body =
+        payload.algorithm === "kmeans"
+          ? {
+              algorithm: "kmeans" as const,
+              k: Math.min(payload.k, points.length),
+              points,
+            }
+          : payload.algorithm === "dbscan"
+            ? {
+                algorithm: "dbscan" as const,
+                dbscanEps: payload.eps,
+                dbscanMinSamples: Math.min(payload.minSamples, points.length),
+                points,
+              }
+            : {
+                algorithm: "isolation_forest" as const,
+                isolationContamination: payload.contamination,
+                points,
+              };
+
+      const resp = await fetchClusterAnalytics(body);
       const map = new Map<number, number>();
       points.forEach((p, i) => map.set(p.satelliteId, resp.labels[i] ?? 0));
       clusterBySatIdRef.current = map;
+      const resolvedAlgo = (resp.algorithm ?? payload.algorithm) as ClusterAlgorithm;
+      clusterAlgorithmRef.current = resolvedAlgo;
       const sizes: Record<number, number> = {};
       resp.labels.forEach((label) => {
         sizes[label] = (sizes[label] ?? 0) + 1;
       });
       setClusterSummary({
-        k: resp.nClusters,
+        algorithm: resolvedAlgo,
+        nClusters: resp.nClusters,
         inertia: resp.inertia ?? null,
         sizes,
+        noiseCount: resp.noiseCount ?? null,
+        paramsLine: formatClusterParamsLine(payload),
       });
       propagateAllRef.current(tles, true);
     } catch (e) {
@@ -862,6 +927,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
 
   const clearClustering = useCallback(() => {
     clusterBySatIdRef.current = null;
+    clusterAlgorithmRef.current = null;
     setClusterSummary(null);
     setClusterError(null);
     propagateAllRef.current(satTlesRef.current, true);
@@ -1286,7 +1352,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
           clusteringBusy={clusteringBusy}
           clusterError={clusterError}
           clusterSummary={clusterSummary}
-          onRunKMeans={(k) => void runKMeans(k)}
+          onRunClustering={(payload) => void runClustering(payload)}
           onClearClustering={clearClustering}
         />
       )}

@@ -1,4 +1,9 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8080";
+/**
+ * Spring API base. Default "" = same-origin `/api/...` via Next rewrites (next.config.ts),
+ * which avoids cross-origin / private-network fetch failures in local dev.
+ * Set NEXT_PUBLIC_API_URL when the UI and API are on different hosts (e.g. production).
+ */
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 export async function fetchSatellites(
   page = 1,
@@ -13,9 +18,41 @@ export async function fetchSatellites(
   if (opts?.sort) params.set("sort", opts.sort);
   if (opts?.group) params.set("group", opts.group);
   if (opts?.type) params.set("type", opts.type);
-  const res = await fetch(`${API_BASE}/api/satellites?${params.toString()}`);
-  if (!res.ok) throw new Error(`Satellites: ${res.status}`);
-  return res.json();
+  const url = `${API_BASE}/api/satellites?${params.toString()}`;
+  const maxAttempts = 4;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url);
+    } catch (netErr) {
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 250 * attempt));
+        continue;
+      }
+      throw netErr instanceof Error ? netErr : new Error(String(netErr));
+    }
+
+    if (res.ok) {
+      return res.json();
+    }
+
+    if (res.status >= 500 && res.status < 600 && attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 250 * attempt));
+      continue;
+    }
+
+    let msg = `Satellites: ${res.status}`;
+    try {
+      const text = await res.text();
+      if (text) msg += ` — ${text.slice(0, 240)}`;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+
+  throw new Error("Satellites: request failed after retries");
 }
 
 export async function fetchSatellite(id: number) {
@@ -95,16 +132,26 @@ export type ClusteringFeaturePoint = {
   meanMotionRpd: number;
 };
 
-export type KMeansClusterResponse = {
+export type ClusterAnalyticsResponse = {
   labels: number[];
   nClusters: number;
   inertia: number | null;
+  algorithm?: string;
+  noiseCount?: number | null;
 };
 
-export async function fetchKMeansClusters(body: {
-  k: number;
+export type ClusterAnalyticsRequest = {
+  algorithm: "kmeans" | "dbscan" | "isolation_forest";
   points: ClusteringFeaturePoint[];
-}): Promise<KMeansClusterResponse> {
+  k?: number;
+  dbscanEps?: number;
+  dbscanMinSamples?: number;
+  isolationContamination?: number;
+};
+
+export async function fetchClusterAnalytics(
+  body: ClusterAnalyticsRequest
+): Promise<ClusterAnalyticsResponse> {
   const res = await fetch(`${API_BASE}/api/analytics/cluster`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
