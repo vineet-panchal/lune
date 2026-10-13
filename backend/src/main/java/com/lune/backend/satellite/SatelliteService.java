@@ -30,12 +30,17 @@ public class SatelliteService {
     private static final int DEFAULT_TRAIL_POINTS_EACH_SIDE = 5;
     private static final double MIN_SPEED_KM_S = 2.0; // avoid div by zero for very slow objects
     private static final long TLE_CACHE_TTL_MS = 3600_000; // cache TLE data for 1 hour
-    private static final long LIST_CACHE_TTL_MS = 900_000; // cache merged list responses for 15 minutes
-    private static final int TLE_SEARCH_PAGE_SIZE = 100;
-    private static final int TLE_SEARCH_MAX_PAGES = 200;
+    private static final int SEARCH_RESULT_LIMIT = 100;
 
-    private static final List<String> INTERNET_SEARCH_TERMS = List.of(
-            "KUIPER", "QIANFAN", "GUOWANG", "GALAXYSPACE", "E-SPACE"
+    /** Catalog keys merged for the "Internet" type. */
+    private static final List<String> INTERNET_KEYS = List.of(
+            SatelliteCatalog.groupKey("STARLINK"),
+            SatelliteCatalog.groupKey("ONEWEB"),
+            SatelliteCatalog.nameKey("KUIPER"),
+            SatelliteCatalog.nameKey("QIANFAN"),
+            SatelliteCatalog.nameKey("GUOWANG"),
+            SatelliteCatalog.nameKey("GALAXYSPACE"),
+            SatelliteCatalog.nameKey("E-SPACE")
     );
 
     private static final Map<String, String> CUSTOM_TYPE_SEARCH_TERMS = Map.ofEntries(
@@ -48,7 +53,13 @@ public class SatelliteService {
             Map.entry("LEO", "KUIPER")
     );
 
-    /** Curated "popular" satellites – no external list call, fast response. */
+    /** Company filters the UI sends as a name search; these are cached in the catalog like groups. */
+    private static final Set<String> CATALOG_NAME_FILTERS = Set.of(
+            "KUIPER", "QIANFAN", "GUOWANG", "GALAXYSPACE", "E-SPACE", "BLUEWALKER", "LYNK",
+            "PLANET", "JILIN", "SATELOG", "SPIRE", "SWARM", "GEESPACE", "TIANQI"
+    );
+
+    /** Curated "popular" satellites, with display names. */
     private static final List<SatelliteListItemDto> POPULAR_SATELLITES = List.of(
             item(25544, "ISS (ZARYA)"),
             item(20580, "HST (Hubble)"),
@@ -58,36 +69,8 @@ public class SatelliteService {
             item(33591, "NOAA 19"),
             item(49260, "LANDSAT 9")
     );
-
-    /** Valid CelesTrak group names — these bypass tle.ivanstanojevic.me and use CelesTrak directly. */
-    private static final Set<String> CELESTRAK_GROUPS = Set.of(
-            "STATIONS", "STARLINK", "ONEWEB", "GPS-OPS", "GLO-OPS",
-            "GALILEO", "BEIDOU", "INTELSAT", "SES", "IRIDIUM",
-            "IRIDIUM-NEXT", "ORBCOMM", "GLOBALSTAR", "AMATEUR",
-            "NOAA", "GOES", "RESOURCE", "SARSAT", "GEO", "ACTIVE"
-    );
-
-    /** Maps CelesTrak group names to search terms for fallback TLE API queries. */
-    private static final Map<String, String> GROUP_SEARCH_TERMS = Map.ofEntries(
-            Map.entry("STARLINK", "starlink"),
-            Map.entry("ONEWEB", "oneweb"),
-            Map.entry("GPS-OPS", "GPS"),
-            Map.entry("GLO-OPS", "GLONASS"),
-            Map.entry("GALILEO", "GALILEO"),
-            Map.entry("BEIDOU", "BEIDOU"),
-            Map.entry("INTELSAT", "INTELSAT"),
-            Map.entry("SES", "SES"),
-            Map.entry("IRIDIUM", "IRIDIUM"),
-            Map.entry("IRIDIUM-NEXT", "IRIDIUM"),
-            Map.entry("ORBCOMM", "ORBCOMM"),
-            Map.entry("GLOBALSTAR", "GLOBALSTAR"),
-            Map.entry("AMATEUR", "AMATEUR"),
-            Map.entry("NOAA", "NOAA"),
-            Map.entry("GOES", "GOES"),
-            Map.entry("STATIONS", "STATION"),
-            Map.entry("GEO", "GEO"),
-            Map.entry("ACTIVE", "")
-    );
+    private static final String POPULAR_KEY = SatelliteCatalog.idsKey(
+            POPULAR_SATELLITES.stream().map(SatelliteListItemDto::getSatelliteId).toList());
 
     private static SatelliteListItemDto item(int id, String name) {
         return SatelliteListItemDto.builder().satelliteId(id).name(name).tleDate(null).build();
@@ -96,23 +79,25 @@ public class SatelliteService {
     private final TleApiClient tleApiClient;
     private final CelestrakApiClient celestrakApiClient;
     private final Sgp4Propagator sgp4Propagator;
+    private final SatelliteCatalog catalog;
 
-    /** Cache of TLE data fetched from CelesTrak, keyed by NORAD ID. */
+    /** Single satellites looked up outside the catalog (e.g. a search result that was clicked), keyed by NORAD ID. */
     private record CachedTle(CelestrakSatelliteDto tle, long fetchedAt) {}
-    private record CachedSatelliteList(List<SatelliteListItemDto> satellites, String dataSource, long fetchedAt) {}
     private final Map<Integer, CachedTle> tleCache = new ConcurrentHashMap<>();
-    private final Map<String, CachedSatelliteList> satelliteListCache = new ConcurrentHashMap<>();
 
     /**
-     * Get TLE for a satellite — uses in-memory cache (1h TTL) backed by CelesTrak, with TLE API fallback.
+     * Get TLE for a satellite: in-memory catalog first, then a one-off CelesTrak / TLE API lookup (cached 1h).
      */
     private Optional<CelestrakSatelliteDto> getCachedTle(int satelliteId) {
+        Optional<CelestrakSatelliteDto> fromCatalog = catalog.findById(satelliteId);
+        if (fromCatalog.isPresent()) {
+            return fromCatalog;
+        }
         CachedTle cached = tleCache.get(satelliteId);
         if (cached != null && System.currentTimeMillis() - cached.fetchedAt() < TLE_CACHE_TTL_MS) {
             return Optional.of(cached.tle());
         }
-        // Try CelesTrak first
-        Optional<CelestrakSatelliteDto> opt = celestrakApiClient.getSatellite(satelliteId);
+        Optional<CelestrakSatelliteDto> opt = celestrakApiClient.fetchSatellite(satelliteId);
         if (opt.isPresent()) {
             tleCache.put(satelliteId, new CachedTle(opt.get(), System.currentTimeMillis()));
             return opt;
@@ -134,201 +119,93 @@ public class SatelliteService {
         return Optional.empty();
     }
 
-    private SatelliteListItemDto enrichPopularSatellite(SatelliteListItemDto item) {
-        Optional<CelestrakSatelliteDto> tle = getCachedTle(item.getSatelliteId());
-        if (tle.isPresent()) {
-            return SatelliteListItemDto.builder()
-                    .satelliteId(item.getSatelliteId())
-                    .name(item.getName())
-                    .tleDate(item.getTleDate())
-                    .type(item.getType())
-                    .line1(tle.get().getLine1())
-                    .line2(tle.get().getLine2())
-                    .build();
+    /**
+     * List satellites with TLEs for client-side propagation. Every filter is served from the in-memory
+     * catalog without waiting on an upstream; loading=true means the catalog is still downloading
+     * and the client should poll again.
+     */
+    public SatelliteListResponseDto getSatellites(int page, int pageSize, String search, String sort, String group, String type) {
+        if ("popular".equalsIgnoreCase(group != null ? group.strip() : null)) {
+            return getPopular(page, pageSize);
         }
-        return item;
+
+        String upperType = type != null && !type.isBlank() ? type.strip().toUpperCase(Locale.ROOT) : null;
+        if ("INTERNET".equals(upperType)) {
+            return fromCatalog(INTERNET_KEYS, "INTERNET", page, pageSize, sort);
+        }
+        if (upperType != null && CUSTOM_TYPE_SEARCH_TERMS.containsKey(upperType)) {
+            return fromCatalog(List.of(SatelliteCatalog.nameKey(CUSTOM_TYPE_SEARCH_TERMS.get(upperType))), upperType, page, pageSize, sort);
+        }
+        if (upperType != null && SatelliteCatalog.CELESTRAK_GROUPS.contains(upperType)) {
+            return fromCatalog(List.of(SatelliteCatalog.groupKey(upperType)), upperType, page, pageSize, sort);
+        }
+
+        String term = search != null ? search.strip() : "";
+        if (!term.isEmpty() && CATALOG_NAME_FILTERS.contains(term.toUpperCase(Locale.ROOT))) {
+            return fromCatalog(List.of(SatelliteCatalog.nameKey(term)), type, page, pageSize, sort);
+        }
+        if (!term.isEmpty()) {
+            // Free-text search box: answer from memory when possible, otherwise ask the TLE API directly.
+            List<CelestrakSatelliteDto> loaded = catalog.searchLoaded(term, SEARCH_RESULT_LIMIT);
+            if (!loaded.isEmpty()) {
+                List<SatelliteListItemDto> items = sortItems(loaded.stream().map(s -> toItem(s, type)).toList(), sort);
+                return paginate(page, pageSize, items, SatelliteCatalog.SOURCE_CELESTRAK, null, false);
+            }
+        }
+        return searchTleApi(page, pageSize, term, sort, type);
     }
 
-    public SatelliteListResponseDto getSatellites(int page, int pageSize, String search, String sort, String group, String type) {
-        // popular group — fast curated list, enrich with TLE data for client-side propagation
-        if ("popular".equalsIgnoreCase(group != null ? group.strip() : null)) {
-            int total = POPULAR_SATELLITES.size();
-            int from = Math.min((page - 1) * pageSize, total);
-            int to = Math.min(from + pageSize, total);
-            List<SatelliteListItemDto> pageItems = from < to
-                    ? POPULAR_SATELLITES.subList(from, to).parallelStream()
-                    .map(this::enrichPopularSatellite)
-                    .toList()
-                    : List.of();
-            return SatelliteListResponseDto.builder()
-                    .satellites(pageItems)
-                    .totalItems(total)
-                    .page(page)
-                    .pageSize(pageSize)
-                    .dataSource("celestrak")
-                    .build();
-        }
-
-        // Type routing
-        String celestrakGroup = type != null ? type.strip().toUpperCase() : null;
-
-        if ("INTERNET".equals(celestrakGroup)) {
-            CachedSatelliteList internetCatalog = getInternetCatalog();
-            return paginateItems(page, pageSize, sortItems(internetCatalog.satellites(), sort), internetCatalog.dataSource());
-        }
-
-        if (celestrakGroup != null && CUSTOM_TYPE_SEARCH_TERMS.containsKey(celestrakGroup)) {
-            String searchTerm = CUSTOM_TYPE_SEARCH_TERMS.get(celestrakGroup);
-            TleListResponseDto filtered = tleApiClient.getTleList(page, pageSize, searchTerm, sort);
-            if (filtered == null || filtered.getMember() == null) {
-                return SatelliteListResponseDto.builder()
-                        .satellites(Collections.emptyList())
-                        .totalItems(0)
-                        .page(page)
-                        .pageSize(pageSize)
-                        .dataSource("tle-api")
-                        .build();
+    private SatelliteListResponseDto getPopular(int page, int pageSize) {
+        SatelliteCatalog.Snapshot snapshot = catalog.get(POPULAR_KEY);
+        List<SatelliteListItemDto> items = new ArrayList<>();
+        for (SatelliteListItemDto popular : POPULAR_SATELLITES) {
+            // Prefer the curated set's own download, but any loaded group (e.g. STATIONS) can supply the TLE.
+            Optional<CelestrakSatelliteDto> tle = snapshot != null
+                    ? snapshot.satellites().stream().filter(s -> s.getNoradCatId().equals(popular.getSatelliteId())).findFirst()
+                    : Optional.empty();
+            if (tle.isEmpty()) {
+                tle = catalog.findById(popular.getSatelliteId());
             }
-            List<SatelliteListItemDto> items = filtered.getMember().stream()
-                    .map(tle -> SatelliteListItemDto.builder()
-                            .satelliteId(tle.getSatelliteId())
-                            .name(tle.getName())
-                            .tleDate(tle.getDate())
-                            .type(celestrakGroup)
-                            .line1(tle.getLine1())
-                            .line2(tle.getLine2())
-                            .build())
-                    .toList();
-            return SatelliteListResponseDto.builder()
-                    .satellites(items)
-                    .totalItems(filtered.getTotalItems() != null ? filtered.getTotalItems() : items.size())
-                    .page(filtered.getParameters() != null && filtered.getParameters().getPage() != null ? filtered.getParameters().getPage() : page)
-                    .pageSize(filtered.getParameters() != null && filtered.getParameters().getPageSize() != null ? filtered.getParameters().getPageSize() : pageSize)
-                    .dataSource("tle-api")
-                    .build();
+            tle.ifPresent(t -> items.add(SatelliteListItemDto.builder()
+                    .satelliteId(popular.getSatelliteId())
+                    .name(popular.getName())
+                    .line1(t.getLine1())
+                    .line2(t.getLine2())
+                    .build()));
         }
+        boolean loading = items.size() < POPULAR_SATELLITES.size() && catalog.isLoading(POPULAR_KEY);
+        String source = snapshot != null ? snapshot.source() : SatelliteCatalog.SOURCE_CELESTRAK;
+        SatelliteListResponseDto resp = paginate(page, pageSize, items, source, snapshot != null ? snapshot.updatedAt() : null, loading);
+        resp.setTotalItems(Math.max(items.size(), loading ? POPULAR_SATELLITES.size() : items.size()));
+        return resp;
+    }
 
-        // CelesTrak group — fetch by category, with fallback to TLE API search
-        if (celestrakGroup != null && CELESTRAK_GROUPS.contains(celestrakGroup)) {
-            List<CelestrakSatelliteDto> raw = celestrakApiClient.getGroup(celestrakGroup);
-            if (!raw.isEmpty()) {
-                // Pre-populate TLE cache so batch position requests don't hit CelesTrak per-satellite
-                long now = System.currentTimeMillis();
-                for (CelestrakSatelliteDto s : raw) {
-                    if (s.getNoradCatId() != null && s.getLine1() != null && s.getLine2() != null) {
-                        tleCache.putIfAbsent(s.getNoradCatId(), new CachedTle(s, now));
-                    }
-                }
-                int total = raw.size();
-                int from = Math.min((page - 1) * pageSize, total);
-                int to = Math.min(from + pageSize, total);
-                List<SatelliteListItemDto> items = raw.subList(from, to).stream()
-                        .filter(s -> s.getNoradCatId() != null)
-                        .map(s -> SatelliteListItemDto.builder()
-                                .satelliteId(s.getNoradCatId())
-                                .name(s.getName())
-                                .tleDate(null)
-                                .type(celestrakGroup)
-                                .line1(s.getLine1())
-                                .line2(s.getLine2())
-                                .build())
-                        .toList();
-                return SatelliteListResponseDto.builder()
-                        .satellites(items)
-                        .totalItems(total)
-                        .page(page)
-                        .pageSize(pageSize)
-                        .dataSource("celestrak")
-                        .build();
+    private SatelliteListResponseDto fromCatalog(List<String> keys, String typeLabel, int page, int pageSize, String sort) {
+        Map<Integer, SatelliteListItemDto> merged = new LinkedHashMap<>();
+        boolean loading = false;
+        Long oldestUpdate = null;
+        Set<String> sources = new LinkedHashSet<>();
+        for (String key : keys) {
+            SatelliteCatalog.Snapshot snapshot = catalog.get(key);
+            if (snapshot == null || !snapshot.complete()) {
+                loading |= snapshot == null || catalog.isLoading(key);
             }
-
-                    // If group GP download is temporarily blocked, recover via CelesTrak table CATNR list + fast per-CATNR fetch.
-                    List<Integer> catalogNumbers = celestrakApiClient.getGroupCatalogNumbers(celestrakGroup);
-                    if (!catalogNumbers.isEmpty()) {
-                    int total = catalogNumbers.size();
-                    int from = Math.min((page - 1) * pageSize, total);
-                    int to = Math.min(from + pageSize, total);
-                    List<Integer> pageIds = from < to ? catalogNumbers.subList(from, to) : List.of();
-
-                    long now = System.currentTimeMillis();
-                    List<SatelliteListItemDto> items = pageIds.parallelStream()
-                        .map(id -> {
-                            Optional<CelestrakSatelliteDto> fast = celestrakApiClient.getSatelliteFast(id);
-                            if (fast.isEmpty()) {
-                            return null;
-                            }
-                            CelestrakSatelliteDto tle = fast.get();
-                            tleCache.putIfAbsent(id, new CachedTle(tle, now));
-                            return SatelliteListItemDto.builder()
-                                .satelliteId(id)
-                                .name(tle.getName())
-                                .tleDate(null)
-                                .type(celestrakGroup)
-                                .line1(tle.getLine1())
-                                .line2(tle.getLine2())
-                                .build();
-                        })
-                        .filter(Objects::nonNull)
-                        .toList();
-
-                    return SatelliteListResponseDto.builder()
-                        .satellites(items)
-                        .totalItems(total)
-                        .page(page)
-                        .pageSize(pageSize)
-                        .dataSource("celestrak-catalog")
-                        .build();
-                    }
-
-            // CelesTrak unreachable/empty — fall through to TLE API search
-            log.warn("CelesTrak group '{}' returned empty, falling back to TLE API search", celestrakGroup);
-            String searchTerm = GROUP_SEARCH_TERMS.getOrDefault(celestrakGroup, celestrakGroup);
-            TleListResponseDto fallback = tleApiClient.getTleList(page, pageSize, searchTerm, sort);
-            if (fallback != null && fallback.getMember() != null) {
-                // Pre-populate TLE cache from fallback results too
-                long now = System.currentTimeMillis();
-                for (TleDto tle : fallback.getMember()) {
-                    if (tle.getSatelliteId() != null && tle.getLine1() != null && tle.getLine2() != null) {
-                        CelestrakSatelliteDto dto = new CelestrakSatelliteDto();
-                        dto.setNoradCatId(tle.getSatelliteId());
-                        dto.setName(tle.getName());
-                        dto.setLine1(tle.getLine1());
-                        dto.setLine2(tle.getLine2());
-                        tleCache.putIfAbsent(tle.getSatelliteId(), new CachedTle(dto, now));
-                    }
-                }
-                List<SatelliteListItemDto> items = fallback.getMember().stream()
-                        .map(tle -> SatelliteListItemDto.builder()
-                                .satelliteId(tle.getSatelliteId())
-                                .name(tle.getName())
-                                .tleDate(tle.getDate())
-                                .type(celestrakGroup)
-                                .line1(tle.getLine1())
-                                .line2(tle.getLine2())
-                                .build())
-                        .toList();
-                return SatelliteListResponseDto.builder()
-                        .satellites(items)
-                        .totalItems(fallback.getTotalItems() != null ? fallback.getTotalItems() : items.size())
-                        .page(page)
-                        .pageSize(pageSize)
-                        .dataSource("tle-api")
-                        .build();
+            if (snapshot == null) {
+                continue;
+            }
+            sources.add(snapshot.source());
+            oldestUpdate = oldestUpdate == null ? snapshot.updatedAt() : Math.min(oldestUpdate, snapshot.updatedAt());
+            for (CelestrakSatelliteDto s : snapshot.satellites()) {
+                merged.putIfAbsent(s.getNoradCatId(), toItem(s, typeLabel));
             }
         }
+        String source = sources.isEmpty() ? null : String.join("+", sources);
+        return paginate(page, pageSize, sortItems(List.copyOf(merged.values()), sort), source, oldestUpdate, loading);
+    }
 
-        // Fallback: tle.ivanstanojevic.me name search
-        TleListResponseDto raw = tleApiClient.getTleList(page, pageSize, search, sort);
-        if (raw == null || raw.getMember() == null) {
-            return SatelliteListResponseDto.builder()
-                    .satellites(Collections.emptyList())
-                    .totalItems(0)
-                    .page(page)
-                    .pageSize(pageSize)
-                    .dataSource("tle-api")
-                    .build();
-        }
-        List<SatelliteListItemDto> items = raw.getMember().stream()
+    private SatelliteListResponseDto searchTleApi(int page, int pageSize, String search, String sort, String type) {
+        TleListResponseDto raw = tleApiClient.getTleList(page, pageSize, search.isEmpty() ? null : search, sort);
+        List<SatelliteListItemDto> items = raw == null || raw.getMember() == null ? List.of() : raw.getMember().stream()
                 .map(tle -> SatelliteListItemDto.builder()
                         .satelliteId(tle.getSatelliteId())
                         .name(tle.getName())
@@ -341,120 +218,25 @@ public class SatelliteService {
         return SatelliteListResponseDto.builder()
                 .satellites(items)
                 .totalItems(items.size())
-                .page(raw.getParameters() != null && raw.getParameters().getPage() != null ? raw.getParameters().getPage() : page)
-                .pageSize(raw.getParameters() != null && raw.getParameters().getPageSize() != null ? raw.getParameters().getPageSize() : pageSize)
-                .dataSource("tle-api")
+                .page(page)
+                .pageSize(pageSize)
+                .dataSource(SatelliteCatalog.SOURCE_TLE_API)
                 .build();
     }
 
-    private CachedSatelliteList getInternetCatalog() {
-        String cacheKey = "INTERNET_V2";
-        CachedSatelliteList cached = satelliteListCache.get(cacheKey);
-        if (cached != null && System.currentTimeMillis() - cached.fetchedAt() < LIST_CACHE_TTL_MS) {
-            return cached;
-        }
-
-        Map<Integer, SatelliteListItemDto> merged = new LinkedHashMap<>();
-        StringBuilder source = new StringBuilder();
-
-        addCelestrakGroupToMap("STARLINK", merged);
-        addCelestrakGroupToMap("ONEWEB", merged);
-        if (!merged.isEmpty()) {
-            source.append("celestrak");
-        }
-
-        for (String term : INTERNET_SEARCH_TERMS) {
-            addTleSearchToMap(term, merged);
-        }
-        if (source.length() > 0) {
-            source.append("+");
-        }
-        source.append("tle-api");
-
-        CachedSatelliteList built = new CachedSatelliteList(List.copyOf(merged.values()), source.toString(), System.currentTimeMillis());
-        satelliteListCache.put(cacheKey, built);
-        return built;
-    }
-
-    private void addCelestrakGroupToMap(String group, Map<Integer, SatelliteListItemDto> target) {
-        List<CelestrakSatelliteDto> groupItems = celestrakApiClient.getGroup(group);
-        if (groupItems.isEmpty()) {
-            String fallbackSearch = GROUP_SEARCH_TERMS.getOrDefault(group.toUpperCase(), group);
-            if (fallbackSearch != null && !fallbackSearch.isBlank()) {
-                addTleSearchToMap(fallbackSearch, target);
-            }
-            return;
-        }
-
-        long now = System.currentTimeMillis();
-        for (CelestrakSatelliteDto s : groupItems) {
-            if (s.getNoradCatId() == null || s.getLine1() == null || s.getLine2() == null) {
-                continue;
-            }
-            tleCache.putIfAbsent(s.getNoradCatId(), new CachedTle(s, now));
-            target.putIfAbsent(s.getNoradCatId(), SatelliteListItemDto.builder()
-                    .satelliteId(s.getNoradCatId())
-                    .name(s.getName())
-                    .tleDate(null)
-                    .type("INTERNET")
-                    .line1(s.getLine1())
-                    .line2(s.getLine2())
-                    .build());
-        }
-    }
-
-    private void addTleSearchToMap(String searchTerm, Map<Integer, SatelliteListItemDto> target) {
-        int fetchedItems = 0;
-        Integer totalItems = null;
-        for (int p = 1; p <= TLE_SEARCH_MAX_PAGES; p++) {
-            TleListResponseDto resp = tleApiClient.getTleList(p, TLE_SEARCH_PAGE_SIZE, searchTerm, "name");
-            if (resp == null || resp.getMember() == null || resp.getMember().isEmpty()) {
-                break;
-            }
-
-            if (totalItems == null && resp.getTotalItems() != null && resp.getTotalItems() > 0) {
-                totalItems = resp.getTotalItems();
-            }
-
-            long now = System.currentTimeMillis();
-            for (TleDto tle : resp.getMember()) {
-                if (tle.getSatelliteId() == null || tle.getLine1() == null || tle.getLine2() == null) {
-                    continue;
-                }
-                CelestrakSatelliteDto dto = new CelestrakSatelliteDto();
-                dto.setNoradCatId(tle.getSatelliteId());
-                dto.setName(tle.getName());
-                dto.setLine1(tle.getLine1());
-                dto.setLine2(tle.getLine2());
-                tleCache.putIfAbsent(tle.getSatelliteId(), new CachedTle(dto, now));
-
-                target.putIfAbsent(tle.getSatelliteId(), SatelliteListItemDto.builder()
-                        .satelliteId(tle.getSatelliteId())
-                        .name(tle.getName())
-                        .tleDate(tle.getDate())
-                        .type("INTERNET")
-                        .line1(tle.getLine1())
-                        .line2(tle.getLine2())
-                        .build());
-            }
-
-            fetchedItems += resp.getMember().size();
-            if (totalItems != null && fetchedItems >= totalItems) {
-                break;
-            }
-
-            if (resp.getMember().size() < TLE_SEARCH_PAGE_SIZE) {
-                break;
-            }
-        }
+    private static SatelliteListItemDto toItem(CelestrakSatelliteDto s, String type) {
+        return SatelliteListItemDto.builder()
+                .satelliteId(s.getNoradCatId())
+                .name(s.getName())
+                .tleDate(null)
+                .type(type)
+                .line1(s.getLine1())
+                .line2(s.getLine2())
+                .build();
     }
 
     private List<SatelliteListItemDto> sortItems(List<SatelliteListItemDto> items, String sort) {
-        if (sort == null || sort.isBlank()) {
-            return items;
-        }
-        String normalized = sort.strip().toLowerCase();
-        if (!"name".equals(normalized)) {
+        if (sort == null || !"name".equalsIgnoreCase(sort.strip())) {
             return items;
         }
         return items.stream()
@@ -464,17 +246,19 @@ public class SatelliteService {
                 .toList();
     }
 
-    private SatelliteListResponseDto paginateItems(int page, int pageSize, List<SatelliteListItemDto> items, String dataSource) {
+    private SatelliteListResponseDto paginate(int page, int pageSize, List<SatelliteListItemDto> items,
+                                              String dataSource, Long tleUpdatedAt, boolean loading) {
         int total = items.size();
         int from = Math.min((page - 1) * pageSize, total);
         int to = Math.min(from + pageSize, total);
-        List<SatelliteListItemDto> paged = from < to ? items.subList(from, to) : List.of();
         return SatelliteListResponseDto.builder()
-                .satellites(paged)
+                .satellites(from < to ? items.subList(from, to) : List.of())
                 .totalItems(total)
                 .page(page)
                 .pageSize(pageSize)
                 .dataSource(dataSource)
+                .tleUpdatedAt(tleUpdatedAt != null ? ISO_FORMAT.format(Instant.ofEpochMilli(tleUpdatedAt)) : null)
+                .loading(loading)
                 .build();
     }
 

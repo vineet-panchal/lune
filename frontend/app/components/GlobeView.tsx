@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { fetchClusterAnalytics, fetchSatellites } from "../lib/api";
+import { createSatelliteLayer, type SatelliteLayer, type SatellitePoint } from "../lib/satelliteLayer";
 import * as satellite from "satellite.js";
 import * as THREE from "three";
 import { feature } from "topojson-client";
@@ -50,7 +51,10 @@ type GlobeInstance = {
   showGraticules: (v: boolean) => GlobeInstance;
   globeMaterial: () => any;
   scene: () => THREE.Scene;
+  camera: () => THREE.Camera;
+  renderer: () => THREE.WebGLRenderer;
   getGlobeRadius: () => number;
+  getCoords: (lat: number, lng: number, altitude?: number) => { x: number; y: number; z: number };
   pointsData: (d: any[]) => GlobeInstance;
   pointLat: (a: any) => GlobeInstance;
   pointLng: (a: any) => GlobeInstance;
@@ -59,14 +63,6 @@ type GlobeInstance = {
   pointRadius: (a: any) => GlobeInstance;
   pointLabel: (a: any) => GlobeInstance;
   onPointClick: (fn: (point: any, event: MouseEvent, coords: any) => void) => GlobeInstance;
-  objectsData: (d: any[]) => GlobeInstance;
-  objectLat: (a: any) => GlobeInstance;
-  objectLng: (a: any) => GlobeInstance;
-  objectAltitude: (a: any) => GlobeInstance;
-  objectLabel: (a: any) => GlobeInstance;
-  objectFacesSurface: (a: any) => GlobeInstance;
-  objectThreeObject: (a: any) => GlobeInstance;
-  onObjectClick: (fn: (obj: any, event: MouseEvent, coords: any) => void) => GlobeInstance;
   pointOfView: (pov: { lat: number; lng: number; altitude: number }, ms?: number) => GlobeInstance;
   pathsData: (d: any[]) => GlobeInstance;
   pathPoints: (a: any) => GlobeInstance;
@@ -306,9 +302,11 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [dataSource, setDataSource] = useState<string | null>(null);
+  const [tleUpdatedAt, setTleUpdatedAt] = useState<string | null>(null);
   const selectedSatsRef = useRef<SelectedSat[]>([]);
   const orbitPathsRef = useRef<OrbitPath[]>([]);
   const satTlesRef = useRef<SatTle[]>([]);
+  const satelliteLayerRef = useRef<SatelliteLayer | null>(null);
 
   const [activePanel, setActivePanel] = useState<"search" | "filter">("filter");
   const [searchQuery, setSearchQuery] = useState("");
@@ -472,76 +470,6 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
         .atmosphereAltitude(0.15)
         .atmosphereColor("rgba(100, 160, 255, 0.5)")
         .showGraticules(true)
-        .objectLat("latitude")
-        .objectLng("longitude")
-        .objectAltitude((d: any) => Math.max(0, (d.altitudeKm ?? 0) / EARTH_RADIUS_KM))
-        .objectFacesSurface(false)
-        .objectThreeObject((d: any) =>
-          new THREE.Mesh(
-            new THREE.SphereGeometry(0.2, 8, 8),
-            new THREE.MeshLambertMaterial({ color: d.color })
-          )
-        )
-        .objectLabel((d: any) => `${d.name} — ${Math.round(d.altitudeKm ?? 0)} km`)
-        .onObjectClick((point: any) => {
-          if (!point?.satelliteId) return;
-          const alreadySelected = selectedSatsRef.current.some(
-            (s) => s.satelliteId === point.satelliteId
-          );
-          if (alreadySelected) {
-            // Deselect
-            const nextSelected = selectedSatsRef.current.filter(
-              (s) => s.satelliteId !== point.satelliteId
-            );
-            const nextPaths = orbitPathsRef.current.filter(
-              (p) => p.satelliteId !== point.satelliteId
-            );
-            selectedSatsRef.current = nextSelected;
-            orbitPathsRef.current = nextPaths;
-            setSelectedSats(nextSelected);
-            setOrbitPaths(nextPaths);
-            return;
-          }
-          // Enforce max selection limit
-          if (selectedSatsRef.current.length >= MAX_SELECTED) {
-            setErrorMsg(`Maximum of ${MAX_SELECTED} satellites can be selected.`);
-            setTimeout(() => setErrorMsg(null), 3000);
-            return;
-          }
-          // Select – compute orbit trail client-side using SGP4
-          const sat: SelectedSat = {
-            satelliteId: point.satelliteId,
-            name: point.name,
-            color: point.color,
-            altitudeKm: point.altitudeKm ?? 0,
-          };
-          const nextSelected = [...selectedSatsRef.current, sat];
-          selectedSatsRef.current = nextSelected;
-          setSelectedSats(nextSelected);
-
-          // Find this satellite's satrec and propagate a full orbit trail (~90 min)
-          const satTle = satTlesRef.current.find((s) => s.satelliteId === point.satelliteId);
-          if (satTle) {
-            const now = new Date();
-            const TRAIL_MINUTES = 90;
-            const STEP_SECONDS = 30;
-            const pts: { lat: number; lng: number; alt: number }[] = [];
-            for (let offset = -TRAIL_MINUTES * 60; offset <= TRAIL_MINUTES * 60; offset += STEP_SECONDS) {
-              const t = new Date(now.getTime() + offset * 1000);
-              const geo = propagateToGeodetic(satTle.satrec, t);
-              if (geo) pts.push(geo);
-            }
-            const path: OrbitPath = {
-              satelliteId: point.satelliteId,
-              color: point.color,
-              points: pts,
-            };
-            const nextPaths = [...orbitPathsRef.current, path];
-            orbitPathsRef.current = nextPaths;
-            setOrbitPaths(nextPaths);
-          }
-        })
-        .objectsData([])
         .pathPoints("points")
         .pathPointLat((p: any) => p.lat)
         .pathPointLng((p: any) => p.lng)
@@ -552,6 +480,73 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
         .pathDashGap(0.004)
         .pathTransitionDuration(0)
         .pathsData([]);
+
+
+      // Click a satellite to select it and draw its orbit (or deselect it)
+      const handleSatelliteClick = (point: SatellitePoint) => {
+        if (!point?.satelliteId) return;
+        const alreadySelected = selectedSatsRef.current.some(
+          (s) => s.satelliteId === point.satelliteId
+        );
+        if (alreadySelected) {
+          // Deselect
+          const nextSelected = selectedSatsRef.current.filter(
+            (s) => s.satelliteId !== point.satelliteId
+          );
+          const nextPaths = orbitPathsRef.current.filter(
+            (p) => p.satelliteId !== point.satelliteId
+          );
+          selectedSatsRef.current = nextSelected;
+          orbitPathsRef.current = nextPaths;
+          setSelectedSats(nextSelected);
+          setOrbitPaths(nextPaths);
+          return;
+        }
+        // Enforce max selection limit
+        if (selectedSatsRef.current.length >= MAX_SELECTED) {
+          setErrorMsg(`Maximum of ${MAX_SELECTED} satellites can be selected.`);
+          setTimeout(() => setErrorMsg(null), 3000);
+          return;
+        }
+        // Select – compute orbit trail client-side using SGP4
+        const sat: SelectedSat = {
+          satelliteId: point.satelliteId,
+          name: point.name,
+          color: point.color,
+          altitudeKm: point.altitudeKm ?? 0,
+        };
+        const nextSelected = [...selectedSatsRef.current, sat];
+        selectedSatsRef.current = nextSelected;
+        setSelectedSats(nextSelected);
+
+        // Find this satellite's satrec and propagate a full orbit trail (~90 min)
+        const satTle = satTlesRef.current.find((s) => s.satelliteId === point.satelliteId);
+        if (satTle) {
+          const now = new Date();
+          const TRAIL_MINUTES = 90;
+          const STEP_SECONDS = 30;
+          const pts: { lat: number; lng: number; alt: number }[] = [];
+          for (let offset = -TRAIL_MINUTES * 60; offset <= TRAIL_MINUTES * 60; offset += STEP_SECONDS) {
+            const t = new Date(now.getTime() + offset * 1000);
+            const geo = propagateToGeodetic(satTle.satrec, t);
+            if (geo) pts.push(geo);
+          }
+          const path: OrbitPath = {
+            satelliteId: point.satelliteId,
+            color: point.color,
+            points: pts,
+          };
+          const nextPaths = [...orbitPathsRef.current, path];
+          orbitPathsRef.current = nextPaths;
+          setOrbitPaths(nextPaths);
+        }
+      };
+
+      const satelliteLayer = createSatelliteLayer(globe, containerRef.current, {
+        onClick: handleSatelliteClick,
+        label: (d) => `${d.name} — ${Math.round(d.altitudeKm ?? 0)} km`,
+      });
+      satelliteLayerRef.current = satelliteLayer;
 
       // Load country borders
       fetch("https://unpkg.com/world-atlas@2/countries-110m.json")
@@ -618,6 +613,9 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
       window.addEventListener("resize", resize);
 
       return () => {
+        satelliteLayer.dispose();
+        // Dev StrictMode mounts twice; don't clear a newer mount's layer.
+        if (satelliteLayerRef.current === satelliteLayer) satelliteLayerRef.current = null;
         window.removeEventListener("resize", resize);
         interactionTarget.removeEventListener("pointerdown", markInteraction);
         interactionTarget.removeEventListener("pointermove", markInteraction);
@@ -634,9 +632,18 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
       };
     };
 
-    init();
+    // init is async, so its cleanup arrives later; run it immediately if we've already unmounted.
+    let cleanup: (() => void) | undefined;
+    let unmounted = false;
+    init().then((fn) => {
+      if (unmounted) fn?.();
+      else cleanup = fn;
+    });
 
-    return () => {};
+    return () => {
+      unmounted = true;
+      cleanup?.();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- globe init once per mount; mode is fixed per route
   }, []);
 
@@ -648,6 +655,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     setSatellites([]);
     setSatCount(0);
     setDataSource(null);
+    setTleUpdatedAt(null);
     lastUiUpdateAtRef.current = 0;
     satTlesRef.current = [];
     selectedSatsRef.current = [];
@@ -668,7 +676,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     // In search mode, clear the globe and don't fetch by type
     if (activePanel === "search") {
       setLoading(false);
-      if (globeRef.current) globeRef.current.objectsData([]);
+      satelliteLayerRef.current?.setData([]);
       return () => { aborted = true; };
     }
 
@@ -676,7 +684,10 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     const opts = satCompany !== "All"
       ? (COMPANY_API_OPTS[satCompany] ?? { search: satCompany })
       : (SAT_TYPE_OPTS[satType] ?? { search: satType });
-    const PAGE_SIZE = 100;
+    // The backend serves whole groups from memory, so one request returns everything.
+    const PAGE_SIZE = 20000;
+    // While the backend is still downloading a group for the first time, poll for what has arrived.
+    const LOADING_POLL_MS = 3000;
 
     /** Propagate all loaded TLEs to current time and update the globe */
     function propagateAll(tles: SatTle[], forceUiUpdate = false) {
@@ -729,50 +740,46 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
           setLastUpdated(now.toLocaleTimeString());
           lastUiUpdateAtRef.current = Date.now();
         }
-        if (globeRef.current) globeRef.current.objectsData(points);
+        satelliteLayerRef.current?.setData(points);
       }
       propagateAllRef.current = propagateAll;
     }
 
     async function fetchTles() {
-      let allTles: SatTle[] = [];
-      let page = 1;
-      let totalItems = Infinity;
+      let tickStarted = false;
 
-      while (allTles.length < totalItems && !aborted) {
-        const resp = await fetchSatellites(page, PAGE_SIZE, opts);
+      while (!aborted) {
+        const resp = await fetchSatellites(1, PAGE_SIZE, opts);
         if (aborted) return;
-        const pageTles: SatTle[] = (resp.satellites ?? [])
+        const tles: SatTle[] = (resp.satellites ?? [])
           .filter((x: any) => x?.satelliteId && x?.line1 && x?.line2)
           .map((x: any) => {
             const satrec = satellite.twoline2satrec(x.line1, x.line2);
             return { satelliteId: x.satelliteId, name: x.name ?? String(x.satelliteId), satrec };
           })
           .filter((s: SatTle) => s.satrec);
-        allTles = [...allTles, ...pageTles];
-        satTlesRef.current = allTles;
-        totalItems = resp.totalItems ?? allTles.length;
-        setSatCount(totalItems);
+        satTlesRef.current = tles;
+        setSatCount(resp.totalItems ?? tles.length);
         if (resp.dataSource) setDataSource(resp.dataSource);
+        setTleUpdatedAt(resp.tleUpdatedAt ?? null);
+        propagateAll(tles, true);
+        setLoading(Boolean(resp.loading));
 
-        // For large catalogs, avoid full propagation on every fetched page.
-        propagateAll(allTles, true);
-        setLoading(false);
+        // Propagation loop — pure math from the TLEs, no network calls
+        if (!tickStarted && tles.length > 0) {
+          tickStarted = true;
+          const tick = () => {
+            const currentTles = satTlesRef.current;
+            propagateAll(currentTles);
+            if (!aborted) {
+              propagateTimer = window.setTimeout(tick, getPropagationIntervalMs(currentTles.length));
+            }
+          };
+          propagateTimer = window.setTimeout(tick, getPropagationIntervalMs(tles.length));
+        }
 
-        if ((resp.satellites ?? []).length === 0 || page * PAGE_SIZE >= totalItems) break;
-        page++;
-      }
-
-      // Start 1-second propagation loop — pure math, no network calls
-      if (!aborted && allTles.length > 0) {
-        const tick = () => {
-          const currentTles = satTlesRef.current;
-          propagateAll(currentTles);
-          if (!aborted) {
-            propagateTimer = window.setTimeout(tick, getPropagationIntervalMs(currentTles.length));
-          }
-        };
-        propagateTimer = window.setTimeout(tick, getPropagationIntervalMs(allTles.length));
+        if (!resp.loading) break;
+        await new Promise((r) => setTimeout(r, LOADING_POLL_MS));
       }
     }
 
@@ -961,7 +968,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
       const points = sats.map(s => ({ ...s, color: altitudeToColor(s.altitudeKm) }));
       setSatellites(sats);
       setLastUpdated(now.toLocaleTimeString());
-      if (globeRef.current) globeRef.current.objectsData(points);
+      satelliteLayerRef.current?.setData(points);
       searchPropTimerRef.current = window.setTimeout(tick, 1000);
     };
     tick();
@@ -1323,6 +1330,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
         satCount={satCount}
         lastUpdated={lastUpdated}
         dataSource={dataSource}
+        tleUpdatedAt={tleUpdatedAt}
         loading={loading}
       />
 
