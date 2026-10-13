@@ -19,6 +19,9 @@ import java.util.Optional;
 @CrossOrigin(origins = {"http://localhost:3000", "http://127.0.0.1:3000"}, allowCredentials = "true")
 public class SatelliteController {
 
+    // Large enough to return a whole group (Starlink is ~10k) in one response; lists come from memory.
+    private static final int MAX_PAGE_SIZE = 20_000;
+
     private static final double DEFAULT_TRAIL_KM = 30.0;
 
     private final SatelliteService satelliteService;
@@ -37,7 +40,7 @@ public class SatelliteController {
             @RequestParam(required = false) String group,
             @RequestParam(required = false) String type) {
         SatelliteListResponseDto body = satelliteService.getSatellites(
-            page, Math.min(pageSize, 500), search, sort, group, type);
+            page, Math.min(pageSize, MAX_PAGE_SIZE), search, sort, group, type);
         return ResponseEntity.ok(body);
         }
 

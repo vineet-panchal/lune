@@ -4,15 +4,19 @@ import com.lune.backend.satellite.dto.PropagationResultDto;
 import com.lune.backend.satellite.dto.TleDto;
 import com.lune.backend.satellite.dto.TleListParameters;
 import com.lune.backend.satellite.dto.TleListResponseDto;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
+import java.util.function.Consumer;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
@@ -20,11 +24,26 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Component
-@RequiredArgsConstructor
 @Slf4j
 public class TleApiClient {
 
+    private static final int BULK_PAGE_SIZE = 100; // TLE API max
+    // The TLE API is a small shared host that answers bursts with 508 "Resource Limit Is Reached".
+    private static final long BULK_PAGE_DELAY_MS = 1_500;
+    private static final long BULK_RETRY_WAIT_MS = 30_000;
+    private static final int BULK_MAX_RETRIES = 5;
+
     private final RestTemplate restTemplate;
+    private final RestTemplate bulkRestTemplate;
+    /** Shared across all bulk loads so concurrent catalog refreshes interleave pages instead of bursting. */
+    private long nextBulkRequestAt = 0;
+
+    public TleApiClient(RestTemplate restTemplate, @Qualifier("bulkRestTemplate") RestTemplate bulkRestTemplate) {
+        this.restTemplate = restTemplate;
+        this.bulkRestTemplate = bulkRestTemplate;
+    }
+
+    public record BulkResult(List<TleDto> items, boolean complete) {}
 
     @Value("${lune.tle-api.base-url:https://tle.ivanstanojevic.me}")
     private String baseUrl;
@@ -65,6 +84,80 @@ public class TleApiClient {
             log.warn("TLE list request failed for '{}': {}", uri, e.getMessage());
             return emptyListResponse(page, cappedPageSize);
         }
+    }
+
+    /**
+     * Download every TLE matching a search term, one page at a time with a pause between pages.
+     * Rate-limit errors wait and retry the same page. onProgress receives the accumulated list after each page.
+     * Meant for background refreshes only: a large group (e.g. Starlink) takes several minutes.
+     */
+    public BulkResult fetchAll(String search, Consumer<List<TleDto>> onProgress) {
+        List<TleDto> items = new ArrayList<>();
+        int page = 1;
+        int failures = 0;
+        while (true) {
+            URI uri = UriComponentsBuilder.fromUriString(baseUrl + "/api/tle/")
+                    .queryParam("page", page)
+                    .queryParam("page-size", BULK_PAGE_SIZE)
+                    .queryParam("search", search)
+                    .queryParam("sort", "id") // stable order so pages don't shift while we walk them
+                    .build()
+                    .toUri();
+            TleListResponseDto resp;
+            try {
+                awaitBulkSlot();
+                resp = bulkRestTemplate.getForObject(uri, TleListResponseDto.class);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return new BulkResult(items, false);
+            } catch (RestClientException e) {
+                if (++failures > BULK_MAX_RETRIES) {
+                    log.warn("TLE API bulk fetch for '{}' gave up at page {} ({} loaded): {}", search, page, items.size(), e.getMessage());
+                    return new BulkResult(items, false);
+                }
+                log.info("TLE API bulk fetch for '{}' page {} failed, retrying in {}s: {}",
+                        search, page, BULK_RETRY_WAIT_MS * failures / 1000, abbreviate(e.getMessage()));
+                delayBulkRequests(BULK_RETRY_WAIT_MS * failures);
+                continue;
+            }
+            failures = 0;
+
+            List<TleDto> members = resp != null && resp.getMember() != null ? resp.getMember() : List.of();
+            for (TleDto tle : members) {
+                if (tle.getSatelliteId() != null && tle.getLine1() != null && tle.getLine2() != null) {
+                    items.add(tle);
+                }
+            }
+            onProgress.accept(items);
+
+            int total = resp != null && resp.getTotalItems() != null ? resp.getTotalItems() : 0;
+            if (members.size() < BULK_PAGE_SIZE || page * BULK_PAGE_SIZE >= total) {
+                return new BulkResult(items, true);
+            }
+            page++;
+        }
+    }
+
+    private void awaitBulkSlot() throws InterruptedException {
+        long wait;
+        synchronized (this) {
+            long now = System.currentTimeMillis();
+            long slot = Math.max(now, nextBulkRequestAt);
+            nextBulkRequestAt = slot + BULK_PAGE_DELAY_MS;
+            wait = slot - now;
+        }
+        if (wait > 0) {
+            Thread.sleep(wait);
+        }
+    }
+
+    /** After a rate-limit error, hold back every bulk loader, not just the one that hit it. */
+    private synchronized void delayBulkRequests(long delayMs) {
+        nextBulkRequestAt = Math.max(nextBulkRequestAt, System.currentTimeMillis() + delayMs);
+    }
+
+    private static String abbreviate(String message) {
+        return message != null && message.length() > 120 ? message.substring(0, 120) + "..." : message;
     }
 
     private TleListResponseDto emptyListResponse(int page, int pageSize) {

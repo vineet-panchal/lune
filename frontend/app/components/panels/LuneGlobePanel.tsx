@@ -19,6 +19,7 @@ type LuneGlobePanelProps = {
   satCount: number;
   lastUpdated: string | null;
   dataSource: string | null;
+  tleUpdatedAt: string | null;
   loading: boolean;
 };
 
@@ -48,6 +49,7 @@ export default function LuneGlobePanel({
   satCount,
   lastUpdated,
   dataSource,
+  tleUpdatedAt,
   loading,
 }: LuneGlobePanelProps) {
   return (
@@ -220,8 +222,10 @@ export default function LuneGlobePanel({
       <div>Satellites: {satellitesLength}{satCount > 0 && satellitesLength < satCount ? ` / ${satCount}` : ""}</div>
       <div>Update: {lastUpdated ?? "--"}</div>
       {dataSource && (
-        <div style={{ marginTop: 2, fontSize: 11, color: dataSource === "celestrak" ? "#66bb6a" : "#ffa726" }}>
-          Source: {dataSource === "celestrak" ? "CelesTrak" : "TLE API"}{dataSource !== "celestrak" ? " (fallback)" : ""}
+        <div style={{ marginTop: 2, fontSize: 11, color: dataSource.includes("tle-api") ? "#ffa726" : "#66bb6a" }}>
+          Source: {dataSource.split("+").map((s) => (s === "celestrak" ? "CelesTrak" : "TLE API")).join(" + ")}
+          {dataSource.includes("tle-api") ? " (fallback)" : ""}
+          {tleUpdatedAt ? ` · TLEs ${formatAge(tleUpdatedAt)}` : ""}
         </div>
       )}
       {loading && (
@@ -234,4 +238,13 @@ export default function LuneGlobePanel({
       </div>
     </div>
   );
+}
+
+function formatAge(iso: string): string {
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (minutes < 1) return "just updated";
+  if (minutes < 60) return `updated ${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `updated ${hours} h ago`;
+  return `updated ${Math.round(hours / 24)} days ago`;
 }

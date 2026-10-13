@@ -1,298 +1,102 @@
 package com.lune.backend.satellite;
 
 import com.lune.backend.satellite.dto.CelestrakSatelliteDto;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component;
-import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
+import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
 import java.net.URI;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
+/**
+ * Bulk TLE downloads from CelesTrak (3LE text format).
+ * Only {@link SatelliteCatalog} should call this: CelesTrak firewalls clients that download the same
+ * data more often than it updates (~every 2 hours), so every call here must be cached by the caller.
+ */
 @Component
-@RequiredArgsConstructor
 @Slf4j
 public class CelestrakApiClient {
 
-    private static final List<String> BASE_URLS = List.of(
-            "https://celestrak.org/NORAD/elements/gp.php",
-            "https://www.celestrak.com/NORAD/elements/gp.php"
-    );
-    private static final long GROUP_CACHE_TTL_MS = 3600_000; // 1 hour
-    private static final int REQUEST_RETRIES = 1;
-    private static final long RETRY_DELAY_MS = 250;
-    private static final Pattern CATNR_LINK_PATTERN = Pattern.compile("gp\\.php\\?CATNR=(\\d+)&FORMAT=tle", Pattern.CASE_INSENSITIVE);
+    private static final String BASE_URL = "https://celestrak.org/NORAD/elements/gp.php";
+    // After any CelesTrak failure, stop calling it for a while instead of retrying on every request.
+    private static final long FAILURE_BACKOFF_MS = 10 * 60_000;
     private static final String USER_AGENT = "lune-backend/1.0 (satellite-tracker)";
 
     private final RestTemplate restTemplate;
+    private volatile long backoffUntil = 0;
 
-    private record CachedGroup(List<CelestrakSatelliteDto> data, long fetchedAt) {}
-    private record CachedCatalogNumbers(List<Integer> data, long fetchedAt) {}
-    private final Map<String, CachedGroup> groupCache = new ConcurrentHashMap<>();
-    private final Map<String, CachedCatalogNumbers> catalogNumbersCache = new ConcurrentHashMap<>();
-
-    /**
-     * Fetch satellites by CelesTrak group name (e.g. "STARLINK", "GPS-OPS", "STATIONS").
-     * Returns an empty list on failure.
-     */
-    public List<CelestrakSatelliteDto> getGroup(String group) {
-        String key = group.toUpperCase();
-        CachedGroup cached = groupCache.get(key);
-        if (cached != null && System.currentTimeMillis() - cached.fetchedAt() < GROUP_CACHE_TTL_MS) {
-            return cached.data();
-        }
-        List<CelestrakSatelliteDto> result = fetchGroupFromJson(group);
-        if (result.isEmpty()) {
-            result = fetchGroupFromText(group);
-        }
-        if (!result.isEmpty()) {
-            groupCache.put(key, new CachedGroup(result, System.currentTimeMillis()));
-        }
-        return result;
+    public CelestrakApiClient(@Qualifier("bulkRestTemplate") RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
     }
 
-    /**
-     * Fetch a CelesTrak group's catalog numbers from the table endpoint.
-     * Used when GROUP GP downloads are temporarily unavailable but per-CATNR queries still work.
-     */
-    public List<Integer> getGroupCatalogNumbers(String group) {
-        String key = group.toUpperCase();
-        CachedCatalogNumbers cached = catalogNumbersCache.get(key);
-        if (cached != null && System.currentTimeMillis() - cached.fetchedAt() < GROUP_CACHE_TTL_MS) {
-            return cached.data();
-        }
-
-        List<Integer> parsed = fetchCatnrsFromTable(group);
-        if (!parsed.isEmpty()) {
-            catalogNumbersCache.put(key, new CachedCatalogNumbers(parsed, System.currentTimeMillis()));
-        }
-        return parsed;
+    /** All satellites in a CelesTrak group (e.g. "STARLINK", "GPS-OPS"). Empty on failure. */
+    public List<CelestrakSatelliteDto> fetchGroup(String group) {
+        return fetch("GROUP", group.toUpperCase());
     }
 
-    /**
-     * Fetch a single satellite's TLE by NORAD catalog ID from CelesTrak.
-     * Returns name, line1, line2 parsed from TLE text format.
-     */
-    public Optional<CelestrakSatelliteDto> getSatellite(int noradId) {
-        Optional<CelestrakSatelliteDto> fromJson = fetchSatelliteFromJson(noradId);
-        if (fromJson.isPresent()) {
-            return fromJson;
-        }
-        Optional<CelestrakSatelliteDto> fromText = fetchSatelliteFromText(noradId);
-        return fromText;
+    /** All satellites whose name contains the given text (e.g. "KUIPER"). Empty on failure. */
+    public List<CelestrakSatelliteDto> fetchByName(String name) {
+        return fetch("NAME", name);
     }
 
-    /**
-     * Fast CATNR lookup path: use TLE text only (no JSON round-trip) to reduce per-item latency
-     * when hydrating large paged group catalogs.
-     */
-    public Optional<CelestrakSatelliteDto> getSatelliteFast(int noradId) {
-        String primaryBaseUrl = BASE_URLS.get(0);
-        URI uri = UriComponentsBuilder.fromUriString(primaryBaseUrl)
-                .queryParam("CATNR", noradId)
-                .queryParam("FORMAT", "TLE")
+    /** One satellite by NORAD catalog number. */
+    public Optional<CelestrakSatelliteDto> fetchSatellite(int noradId) {
+        return fetch("CATNR", String.valueOf(noradId)).stream().findFirst();
+    }
+
+    public boolean isBackingOff() {
+        return System.currentTimeMillis() < backoffUntil;
+    }
+
+    private List<CelestrakSatelliteDto> fetch(String param, String value) {
+        if (isBackingOff()) {
+            return List.of();
+        }
+        URI uri = UriComponentsBuilder.fromUriString(BASE_URL)
+                .queryParam(param, value)
+                .queryParam("FORMAT", "3le")
                 .build()
                 .toUri();
         try {
             String body = restTemplate.exchange(uri, HttpMethod.GET, new HttpEntity<>(buildHeaders()), String.class).getBody();
-            Optional<CelestrakSatelliteDto> parsed = parseTextTle(body, noradId);
-            if (parsed.isPresent()) {
-                return parsed;
-            }
+            return parse3le(body);
         } catch (Exception e) {
-            log.debug("CelesTrak fast CATNR fetch failed for {} via {}: {}", noradId, primaryBaseUrl, e.getMessage());
-        }
-        return Optional.empty();
-    }
-
-    private Optional<CelestrakSatelliteDto> fetchSatelliteFromJson(int noradId) {
-        for (String baseUrl : BASE_URLS) {
-            URI uri = UriComponentsBuilder.fromUriString(baseUrl)
-                    .queryParam("CATNR", noradId)
-                    .queryParam("FORMAT", "json")
-                    .build()
-                    .toUri();
-            for (int attempt = 1; attempt <= REQUEST_RETRIES; attempt++) {
-                try {
-                    ResponseEntity<List<CelestrakSatelliteDto>> response = restTemplate.exchange(
-                            uri,
-                            HttpMethod.GET,
-                            new HttpEntity<>(buildHeaders()),
-                            new ParameterizedTypeReference<>() {}
-                    );
-                    List<CelestrakSatelliteDto> body = response.getBody();
-                    if (body == null || body.isEmpty()) {
-                        continue;
-                    }
-                    CelestrakSatelliteDto first = body.get(0);
-                    if (first.getNoradCatId() != null && first.getLine1() != null && first.getLine2() != null) {
-                        return Optional.of(first);
-                    }
-                } catch (Exception e) {
-                    maybePauseBeforeRetry(attempt);
-                    log.debug("CelesTrak JSON satellite fetch failed for {} via {} (attempt {}/{}): {}",
-                            noradId, baseUrl, attempt, REQUEST_RETRIES, e.getMessage());
-                }
+            if (!isBackingOff()) {
+                log.warn("CelesTrak request failed ({}); pausing CelesTrak calls for {} min", e.getMessage(), FAILURE_BACKOFF_MS / 60_000);
             }
-        }
-        return Optional.empty();
-    }
-
-    private Optional<CelestrakSatelliteDto> fetchSatelliteFromText(int noradId) {
-        for (String baseUrl : BASE_URLS) {
-            URI uri = UriComponentsBuilder.fromUriString(baseUrl)
-                    .queryParam("CATNR", noradId)
-                    .queryParam("FORMAT", "TLE")
-                    .build()
-                    .toUri();
-            for (int attempt = 1; attempt <= REQUEST_RETRIES; attempt++) {
-                try {
-                    String body = restTemplate.exchange(uri, HttpMethod.GET, new HttpEntity<>(buildHeaders()), String.class).getBody();
-                    Optional<CelestrakSatelliteDto> parsed = parseTextTle(body, noradId);
-                    if (parsed.isPresent()) {
-                        return parsed;
-                    }
-                } catch (Exception e) {
-                    maybePauseBeforeRetry(attempt);
-                    log.debug("CelesTrak text satellite fetch failed for {} via {} (attempt {}/{}): {}",
-                            noradId, baseUrl, attempt, REQUEST_RETRIES, e.getMessage());
-                }
-            }
-        }
-        log.warn("CelesTrak single satellite fetch failed for {} across all endpoints", noradId);
-        return Optional.empty();
-    }
-
-    private List<CelestrakSatelliteDto> fetchGroupFromJson(String group) {
-        for (String baseUrl : BASE_URLS) {
-            URI uri = UriComponentsBuilder.fromUriString(baseUrl)
-                    .queryParam("GROUP", group.toUpperCase())
-                    .queryParam("FORMAT", "json")
-                    .build()
-                    .toUri();
-            for (int attempt = 1; attempt <= REQUEST_RETRIES; attempt++) {
-                try {
-                    ResponseEntity<List<CelestrakSatelliteDto>> response = restTemplate.exchange(
-                            uri,
-                            HttpMethod.GET,
-                            new HttpEntity<>(buildHeaders()),
-                            new ParameterizedTypeReference<>() {}
-                    );
-                    List<CelestrakSatelliteDto> body = response.getBody();
-                    if (body == null || body.isEmpty()) {
-                        continue;
-                    }
-                    List<CelestrakSatelliteDto> valid = body.stream()
-                            .filter(s -> s.getNoradCatId() != null && s.getLine1() != null && s.getLine2() != null)
-                            .toList();
-                    if (!valid.isEmpty()) {
-                        return valid;
-                    }
-                } catch (Exception e) {
-                    maybePauseBeforeRetry(attempt);
-                    log.debug("CelesTrak JSON group fetch failed for '{}' via {} (attempt {}/{}): {}",
-                            group, baseUrl, attempt, REQUEST_RETRIES, e.getMessage());
-                }
-            }
-        }
-        return List.of();
-    }
-
-    private List<CelestrakSatelliteDto> fetchGroupFromText(String group) {
-        for (String baseUrl : BASE_URLS) {
-            URI uri = UriComponentsBuilder.fromUriString(baseUrl)
-                    .queryParam("GROUP", group.toUpperCase())
-                    .queryParam("FORMAT", "3le")
-                    .build()
-                    .toUri();
-            for (int attempt = 1; attempt <= REQUEST_RETRIES; attempt++) {
-                try {
-                    String body = restTemplate.exchange(uri, HttpMethod.GET, new HttpEntity<>(buildHeaders()), String.class).getBody();
-                    List<CelestrakSatelliteDto> parsed = parseTextGroup(body);
-                    if (!parsed.isEmpty()) {
-                        return parsed;
-                    }
-                } catch (Exception e) {
-                    maybePauseBeforeRetry(attempt);
-                    log.debug("CelesTrak text group fetch failed for '{}' via {} (attempt {}/{}): {}",
-                            group, baseUrl, attempt, REQUEST_RETRIES, e.getMessage());
-                }
-            }
-        }
-        log.warn("CelesTrak group fetch failed/empty for '{}' across all endpoints", group);
-        return List.of();
-    }
-
-    private List<Integer> fetchCatnrsFromTable(String group) {
-        for (String baseUrl : BASE_URLS) {
-            String tableUrl = baseUrl.replace("gp.php", "table.php");
-            URI uri = UriComponentsBuilder.fromUriString(tableUrl)
-                    .queryParam("GROUP", group.toUpperCase())
-                    .queryParam("FORMAT", "tle")
-                    .build()
-                    .toUri();
-            try {
-                String body = restTemplate.exchange(uri, HttpMethod.GET, new HttpEntity<>(buildHeaders()), String.class).getBody();
-                if (body == null || body.isBlank()) {
-                    continue;
-                }
-                List<Integer> parsed = parseCatnrsFromTableHtml(body);
-                if (!parsed.isEmpty()) {
-                    return parsed;
-                }
-            } catch (Exception e) {
-                log.debug("CelesTrak table CATNR fetch failed for '{}' via {}: {}", group, uri, e.getMessage());
-            }
-        }
-        return List.of();
-    }
-
-    private List<Integer> parseCatnrsFromTableHtml(String body) {
-        LinkedHashSet<Integer> catnrs = new LinkedHashSet<>();
-        Matcher matcher = CATNR_LINK_PATTERN.matcher(body);
-        while (matcher.find()) {
-            try {
-                catnrs.add(Integer.parseInt(matcher.group(1)));
-            } catch (NumberFormatException ignored) {
-                // Skip malformed IDs.
-            }
-        }
-        return List.copyOf(catnrs);
-    }
-
-    private List<CelestrakSatelliteDto> parseTextGroup(String body) {
-        if (body == null || body.isBlank()) {
+            backoffUntil = System.currentTimeMillis() + FAILURE_BACKOFF_MS;
             return List.of();
         }
-        if (body.stripLeading().startsWith("<")) {
+    }
+
+    /** Parse 3LE text (name line, line 1, line 2 per satellite). Lines starting with '#' are ignored. */
+    static List<CelestrakSatelliteDto> parse3le(String body) {
+        if (body == null || body.isBlank() || body.stripLeading().startsWith("<")) {
             return List.of();
         }
+        String[] lines = body.strip().lines()
+                .map(String::trim)
+                .filter(l -> !l.isEmpty() && !l.startsWith("#"))
+                .toArray(String[]::new);
 
-        String[] lines = body.strip().split("\\r?\\n");
         List<CelestrakSatelliteDto> result = new ArrayList<>();
-
-        for (int i = 0; i + 2 < lines.length; i += 3) {
-            String nameLine = lines[i].trim();
-            String l1 = lines[i + 1].trim();
-            String l2 = lines[i + 2].trim();
+        for (int i = 0; i + 2 < lines.length; ) {
+            String nameLine = lines[i];
+            String l1 = lines[i + 1];
+            String l2 = lines[i + 2];
             if (!l1.startsWith("1 ") || !l2.startsWith("2 ")) {
+                i++; // resync on malformed input
                 continue;
             }
+            i += 3;
             CelestrakSatelliteDto dto = new CelestrakSatelliteDto();
             dto.setName(nameLine.startsWith("0 ") ? nameLine.substring(2).trim() : nameLine);
             dto.setLine1(l1);
@@ -307,64 +111,20 @@ public class CelestrakApiClient {
         return result;
     }
 
-    private Optional<CelestrakSatelliteDto> parseTextTle(String body, int noradId) {
-        if (body == null || body.isBlank()) {
-            return Optional.empty();
+    static String format3le(List<CelestrakSatelliteDto> satellites) {
+        StringBuilder sb = new StringBuilder(satellites.size() * 170);
+        for (CelestrakSatelliteDto s : satellites) {
+            sb.append(s.getName() != null ? s.getName() : s.getNoradCatId()).append('\n')
+                    .append(s.getLine1()).append('\n')
+                    .append(s.getLine2()).append('\n');
         }
-        if (body.stripLeading().startsWith("<")) {
-            return Optional.empty();
-        }
-
-        String[] lines = Arrays.stream(body.strip().split("\\r?\\n"))
-                .map(String::trim)
-                .filter(s -> !s.isBlank())
-                .toArray(String[]::new);
-
-        if (lines.length < 2) {
-            return Optional.empty();
-        }
-
-        String name = null;
-        String l1 = null;
-        String l2 = null;
-        for (String line : lines) {
-            if (line.startsWith("1 ") && l1 == null) {
-                l1 = line;
-            } else if (line.startsWith("2 ") && l2 == null) {
-                l2 = line;
-            } else if (name == null) {
-                name = line.startsWith("0 ") ? line.substring(2).trim() : line;
-            }
-        }
-
-        if (l1 == null || l2 == null) {
-            return Optional.empty();
-        }
-
-        CelestrakSatelliteDto dto = new CelestrakSatelliteDto();
-        dto.setName(name);
-        dto.setNoradCatId(noradId);
-        dto.setLine1(l1);
-        dto.setLine2(l2);
-        return Optional.of(dto);
+        return sb.toString();
     }
 
     private HttpHeaders buildHeaders() {
         HttpHeaders headers = new HttpHeaders();
         headers.set(HttpHeaders.USER_AGENT, USER_AGENT);
-        headers.setAccept(List.of(MediaType.APPLICATION_JSON, MediaType.TEXT_PLAIN, MediaType.ALL));
+        headers.setAccept(List.of(MediaType.TEXT_PLAIN, MediaType.ALL));
         return headers;
     }
-
-    private void maybePauseBeforeRetry(int attempt) {
-        if (attempt >= REQUEST_RETRIES) {
-            return;
-        }
-        try {
-            Thread.sleep(RETRY_DELAY_MS);
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
 }
