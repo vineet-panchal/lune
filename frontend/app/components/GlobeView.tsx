@@ -6,6 +6,7 @@ import { createSatelliteLayer, keyframeFromPoints, type Keyframe, type Satellite
 import { createStore, useStore, type Store } from "../lib/store";
 import { clusterLabelToColor } from "../lib/clusterLabels";
 import { clusterRunToCsv, downloadText, fileTimestamp, slug, type ClusterRun } from "../lib/clusterExport";
+import { featureNames, featureVector, ORBITAL_ELEMENTS, type FeatureSelection } from "../lib/clusterFeatures";
 import { computeStaticColoring, isColorMode, type ColorMode } from "../lib/colorModes";
 import { createSimClock } from "../lib/simClock";
 import { createPropagator, type Positions, type Propagator } from "../lib/propagator";
@@ -172,6 +173,14 @@ function altitudeToColor(altKm: number): string {
 const ANALYTICS_PANEL_WIDTH_PX = 392;
 /** Size of the textured Earth inside the full-size wireframe one on the Orbital Intelligence page. */
 const ORBITAL_INTELLIGENCE_EARTH_SCALE = 0.22;
+
+/** "position (x, y, z)" or "altitude, inclination, orbital plane". */
+function formatFeaturesLine(selection: FeatureSelection): string {
+  if (selection.set === "position") return "position (x, y, z)";
+  return ORBITAL_ELEMENTS.filter((e) => selection.elements.includes(e.id))
+    .map((e) => e.label.toLowerCase())
+    .join(", ");
+}
 
 function formatClusterParamsLine(payload: ClusterRunPayload): string {
   switch (payload.algorithm) {
@@ -1375,20 +1384,16 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     setClusterError(null);
     try {
       const now = clock.now();
+      const nowMs = now.getTime();
+      // Only satellites drawn on the globe (propagate to a plausible position) are clustered, in either mode.
       const geos: { lat: number; lng: number; alt: number }[] = [];
       const points = tles.map((t) => {
         const geo = propagateToGeodetic(t.satrec, now);
         if (!geo) return null;
+        const features = featureVector(payload.features, t.satrec, geodeticToCartesianKm(geo.lat, geo.lng, geo.alt), nowMs);
+        if (!features.every(Number.isFinite)) return null;
         geos.push(geo);
-        const xyz = geodeticToCartesianKm(geo.lat, geo.lng, geo.alt);
-        return {
-          satelliteId: t.satelliteId,
-          name: t.name,
-          // Keep the existing API field names for compatibility; values are XYZ position-space features.
-          altitudeKm: xyz.x,
-          inclinationDeg: xyz.y,
-          meanMotionRpd: xyz.z,
-        };
+        return { satelliteId: t.satelliteId, name: t.name, features };
       }).filter((p): p is NonNullable<typeof p> => Boolean(p));
       if (points.length < 2) {
         throw new Error("Not enough propagated points available for clustering right now.");
@@ -1431,19 +1436,20 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
         sizes,
         noiseCount: resp.noiseCount ?? null,
         paramsLine: formatClusterParamsLine(payload),
-        computedAtMs: now.getTime(),
+        featureSet: payload.features.set,
+        featuresLine: formatFeaturesLine(payload.features),
+        computedAtMs: nowMs,
       });
       lastClusterRunRef.current = {
         algorithm: resolvedAlgo,
         paramsLine: formatClusterParamsLine(payload),
-        computedAtMs: now.getTime(),
+        featureNames: featureNames(payload.features),
+        computedAtMs: nowMs,
         rows: points.map((p, i) => ({
           satelliteId: p.satelliteId,
           name: p.name,
           label: resp.labels[i] ?? 0,
-          xKm: p.altitudeKm,
-          yKm: p.inclinationDeg,
-          zKm: p.meanMotionRpd,
+          features: p.features,
           ...geos[i],
         })),
       };

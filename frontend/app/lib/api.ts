@@ -127,9 +127,8 @@ export async function planTrajectory(body: {
 export type ClusteringFeaturePoint = {
   satelliteId: number;
   name: string;
-  altitudeKm: number;
-  inclinationDeg: number;
-  meanMotionRpd: number;
+  /** Same features in the same order for every point (see lib/clusterFeatures). */
+  features: number[];
 };
 
 export type ClusterAnalyticsResponse = {

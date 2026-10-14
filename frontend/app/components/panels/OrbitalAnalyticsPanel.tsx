@@ -1,8 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { fetchAnalyticsHealth } from "../../lib/api";
 import { clusterLabelName, clusterLabelToColor, type ClusterAlgorithm } from "../../lib/clusterLabels";
+import {
+  DEFAULT_ELEMENTS,
+  ORBITAL_ELEMENTS,
+  STALE_AFTER_MS,
+  type FeatureSelection,
+  type FeatureSet,
+  type OrbitalElement,
+} from "../../lib/clusterFeatures";
 
 export type { ClusterAlgorithm };
 
@@ -13,25 +21,39 @@ export type ClusterSummary = {
   sizes: Record<number, number>;
   noiseCount: number | null;
   paramsLine: string;
+  /** What the satellites were compared by, and a readable list of it. */
+  featureSet: FeatureSet;
+  featuresLine: string;
   /** The (simulated) moment whose positions were clustered. */
   computedAtMs: number;
 };
 
 /** How often to ask whether the Python service is reachable. */
 const HEALTH_POLL_MS = 15_000;
-/**
- * Features are positions at one moment; LEO satellites cover ~2,000 km in 5 minutes, so after that the
- * colours no longer describe where the dots are.
- */
-const STALE_AFTER_MS = 5 * 60_000;
 const NOW_REFRESH_MS = 1000;
 
 type Health = "checking" | "online" | "offline";
 
-export type ClusterRunPayload =
+export type ClusterRunPayload = (
   | { algorithm: "kmeans"; k: number }
   | { algorithm: "dbscan"; eps: number; minSamples: number }
-  | { algorithm: "isolation_forest"; contamination: number };
+  | { algorithm: "isolation_forest"; contamination: number }
+) & { features: FeatureSelection };
+
+const FEATURE_SET_OPTIONS: { id: FeatureSet; label: string; description: string }[] = [
+  {
+    id: "elements",
+    label: "Orbital elements",
+    description:
+      "Compares the orbits themselves, from each TLE. Finds shells and orbital planes; the groups stay valid for hours.",
+  },
+  {
+    id: "position",
+    label: "Position now",
+    description:
+      "Compares where satellites are right now (x, y, z in km from Earth's centre). Finds groups by place; they drift apart within minutes.",
+  },
+];
 
 type OrbitalAnalyticsPanelProps = {
   satelliteSampleCount: number;
@@ -99,7 +121,17 @@ export default function OrbitalAnalyticsPanel({
     const timer = window.setInterval(update, NOW_REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [clusterSummary, getNow]);
-  const stale = clusterSummary !== null && nowMs !== null && Math.abs(nowMs - clusterSummary.computedAtMs) > STALE_AFTER_MS;
+  const stale =
+    clusterSummary !== null &&
+    nowMs !== null &&
+    Math.abs(nowMs - clusterSummary.computedAtMs) > STALE_AFTER_MS[clusterSummary.featureSet];
+
+  const [featureSet, setFeatureSet] = useState<FeatureSet>("elements");
+  const [elements, setElements] = useState<OrbitalElement[]>(DEFAULT_ELEMENTS);
+  const toggleElement = (id: OrbitalElement) =>
+    setElements((prev) => (prev.includes(id) ? prev.filter((e) => e !== id) : [...prev, id]));
+  const features: FeatureSelection = featureSet === "position" ? { set: "position" } : { set: "elements", elements };
+  const featuresReady = featureSet === "position" || elements.length > 0;
 
   const [algorithm, setAlgorithm] = useState<ClusterAlgorithm>("kmeans");
   const [k, setK] = useState(5);
@@ -124,12 +156,13 @@ export default function OrbitalAnalyticsPanel({
     !loadingCatalog && !clusteringBusy && satelliteSampleCount >= 2;
 
   const canRun =
-    algorithm === "kmeans" ? canRunKMeans : algorithm === "dbscan" ? canRunDbscan : canRunIsolation;
+    featuresReady &&
+    (algorithm === "kmeans" ? canRunKMeans : algorithm === "dbscan" ? canRunDbscan : canRunIsolation);
 
   const run = () => {
     if (!canRun) return;
     if (algorithm === "kmeans") {
-      onRunClustering({ algorithm: "kmeans", k: Math.min(kEffective, Math.max(2, satelliteSampleCount)) });
+      onRunClustering({ algorithm: "kmeans", k: Math.min(kEffective, Math.max(2, satelliteSampleCount)), features });
       return;
     }
     if (algorithm === "dbscan") {
@@ -137,15 +170,16 @@ export default function OrbitalAnalyticsPanel({
         algorithm: "dbscan",
         eps: dbscanEps,
         minSamples: Math.min(dbscanMinSamples, satelliteSampleCount),
+        features,
       });
       return;
     }
-    onRunClustering({ algorithm: "isolation_forest", contamination: isolationContamination });
+    onRunClustering({ algorithm: "isolation_forest", contamination: isolationContamination, features });
   };
 
   const algoTitle =
     algorithm === "kmeans"
-      ? "K-means partitions satellites into k spatial groups."
+      ? "K-means partitions satellites into k groups."
       : algorithm === "dbscan"
         ? "DBSCAN finds density-based clusters and marks sparse points as noise."
         : "Isolation forest highlights points that look unlike the bulk of the fleet (anomalies).";
@@ -173,10 +207,59 @@ export default function OrbitalAnalyticsPanel({
         <HealthBadge health={health} />
       </div>
       <p style={{ margin: "0 0 16px", color: "rgba(220,228,240,0.72)", lineHeight: 1.5 }}>
-        Each satellite is a point in Earth-centered Cartesian space (x, y, z in km) from its current propagated
-        position. Models run in the Python analytics service (scikit-learn) via Spring Boot; the globe colors
-        update from the returned labels.
+        Group the loaded satellites with machine learning. Models run in the Python analytics service
+        (scikit-learn) via Spring Boot; the globe colours update from the returned labels.
       </p>
+
+      <section
+        style={{
+          padding: 14,
+          borderRadius: 10,
+          background: "rgba(255,255,255,0.04)",
+          border: "1px solid rgba(255,255,255,0.08)",
+          marginBottom: 14,
+        }}
+      >
+        <div style={{ fontWeight: 600, marginBottom: 10, color: "#c5d5f1" }}>Compare satellites by</div>
+        <div role="tablist" aria-label="Features" style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+          {FEATURE_SET_OPTIONS.map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              role="tab"
+              aria-selected={featureSet === opt.id}
+              onClick={() => setFeatureSet(opt.id)}
+              disabled={clusteringBusy}
+              style={chipStyle(featureSet === opt.id, clusteringBusy)}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <p style={{ margin: featureSet === "elements" ? "0 0 10px" : 0, fontSize: 11, color: "rgba(190,200,220,0.7)", lineHeight: 1.45 }}>
+          {FEATURE_SET_OPTIONS.find((o) => o.id === featureSet)?.description}
+        </p>
+        {featureSet === "elements" && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {ORBITAL_ELEMENTS.map((el) => (
+              <label key={el.id} style={{ display: "flex", alignItems: "baseline", gap: 8, cursor: "pointer", fontSize: 11 }}>
+                <input
+                  type="checkbox"
+                  checked={elements.includes(el.id)}
+                  onChange={() => toggleElement(el.id)}
+                  disabled={clusteringBusy}
+                  style={{ accentColor: "#7ba4e8", margin: 0, transform: "translateY(1px)" }}
+                />
+                <span style={{ color: "rgba(220,228,240,0.9)" }}>{el.label}</span>
+                <span style={{ color: "rgba(170,182,200,0.6)", fontSize: 10 }}>{el.detail}</span>
+              </label>
+            ))}
+            {!featuresReady && (
+              <div style={{ fontSize: 10, color: "#ffb4a8" }}>Pick at least one element to compare by.</div>
+            )}
+          </div>
+        )}
+      </section>
 
       <section
         style={{
@@ -193,32 +276,19 @@ export default function OrbitalAnalyticsPanel({
           aria-label="Clustering model"
           style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}
         >
-          {ALGO_OPTIONS.map((opt) => {
-            const active = algorithm === opt.id;
-            return (
-              <button
-                key={opt.id}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => setAlgorithm(opt.id)}
-                disabled={clusteringBusy}
-                style={{
-                  padding: "6px 10px",
-                  borderRadius: 8,
-                  border: active ? "1px solid rgba(123, 164, 232, 0.75)" : "1px solid rgba(255,255,255,0.12)",
-                  background: active ? "rgba(86, 132, 214, 0.35)" : "rgba(255,255,255,0.05)",
-                  color: active ? "#e8f0ff" : "rgba(200,210,230,0.75)",
-                  cursor: clusteringBusy ? "not-allowed" : "pointer",
-                  fontFamily: "inherit",
-                  fontSize: 11,
-                  fontWeight: 600,
-                }}
-              >
-                {opt.label}
-              </button>
-            );
-          })}
+          {ALGO_OPTIONS.map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              role="tab"
+              aria-selected={algorithm === opt.id}
+              onClick={() => setAlgorithm(opt.id)}
+              disabled={clusteringBusy}
+              style={chipStyle(algorithm === opt.id, clusteringBusy)}
+            >
+              {opt.label}
+            </button>
+          ))}
         </div>
 
         <p style={{ margin: "0 0 12px", fontSize: 11, color: "rgba(190,200,220,0.7)", lineHeight: 1.45 }}>
@@ -394,8 +464,12 @@ export default function OrbitalAnalyticsPanel({
               </span>
             )}
           </div>
-          <div style={{ fontSize: 10, color: "rgba(170,182,200,0.65)", marginBottom: 8 }}>
-            Positions at {formatRunTime(clusterSummary.computedAtMs)}
+          <div style={{ fontSize: 10, color: "rgba(170,182,200,0.65)", marginBottom: 8, lineHeight: 1.5 }}>
+            <div>By {clusterSummary.featuresLine}</div>
+            <div>
+              {clusterSummary.featureSet === "position" ? "Positions" : "Orbits"} at{" "}
+              {formatRunTime(clusterSummary.computedAtMs)}
+            </div>
           </div>
           {stale && (
             <div
@@ -411,7 +485,8 @@ export default function OrbitalAnalyticsPanel({
               }}
             >
               Out of date: the globe is {formatGap(Math.abs((nowMs ?? 0) - clusterSummary.computedAtMs))} away from this
-              run, and the satellites have moved since. Run the model again for current groupings.
+              run, and the satellites{clusterSummary.featureSet === "position" ? " have moved" : "' orbital planes have turned"}{" "}
+              since. Run the model again for current groupings.
             </div>
           )}
           {clusterSummary.algorithm !== "kmeans" && (
@@ -456,6 +531,21 @@ export default function OrbitalAnalyticsPanel({
       )}
     </aside>
   );
+}
+
+/** A selectable pill (feature set, model). */
+function chipStyle(active: boolean, disabled: boolean): CSSProperties {
+  return {
+    padding: "6px 10px",
+    borderRadius: 8,
+    border: active ? "1px solid rgba(123, 164, 232, 0.75)" : "1px solid rgba(255,255,255,0.12)",
+    background: active ? "rgba(86, 132, 214, 0.35)" : "rgba(255,255,255,0.05)",
+    color: active ? "#e8f0ff" : "rgba(200,210,230,0.75)",
+    cursor: disabled ? "not-allowed" : "pointer",
+    fontFamily: "inherit",
+    fontSize: 11,
+    fontWeight: 600,
+  };
 }
 
 const HEALTH_STYLE: Record<Health, { label: string; color: string; title: string }> = {

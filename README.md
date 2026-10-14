@@ -131,7 +131,9 @@ GET /api/satellites/positions?ids=25544,49260,48274
 ### Analytics
 
 ```bash
-# Cluster satellites by orbital parameters
+# Cluster satellites by any features (same features, same order, for every point).
+# The UI sends either position now [x_km, y_km, z_km] or orbital elements,
+# e.g. [mean_altitude_km, inclination_deg, raan_sin, raan_cos].
 POST /api/analytics/cluster
 {
   "algorithm": "kmeans",
@@ -140,12 +142,13 @@ POST /api/analytics/cluster
     {
       "satelliteId": 25544,
       "name": "ISS",
-      "altitudeKm": 408,
-      "inclinationDeg": 51.6,
-      "meanMotionRpd": 15.54
+      "features": [415.2, 51.64, 0.81, -0.59]
     }
   ]
 }
+
+# Is the Python analytics service reachable?
+GET /api/analytics/health
 ```
 
 ### Launches
@@ -217,11 +220,8 @@ const fetchAndUpdateSatellites = async () => {
 ```python
 @app.post("/cluster")
 async def cluster_satellites(request: ClusterRequest):
-    # Prepare feature matrix: [altitude, inclination, mean_motion]
-    X = np.array([
-        [p.altitude_km, p.inclination_deg, p.mean_motion_rpd]
-        for p in request.points
-    ])
+    # Feature matrix: one row per satellite, columns chosen by the client
+    X = np.array([p.features for p in request.points])
     
     # Normalize features
     scaler = StandardScaler()
