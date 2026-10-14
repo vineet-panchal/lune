@@ -3,6 +3,7 @@ import { clusterLabelName, clusterLabelToColor, isOutlierGroup } from "../../../
 import { clusterStats, explainOutliers } from "../../../lib/clusterInsights";
 import type { OrbitPoint } from "../../../lib/clusterFeatures";
 import type { ClusterSummary } from "../OrbitalAnalyticsPanel";
+import AltitudeHistory from "./AltitudeHistory";
 import { LINK, MUTED, TEXT, buttonStyle, linkStyle } from "./ui";
 
 type ClusterInspectorProps = {
@@ -106,6 +107,7 @@ function GroupDetails({
   trackerUrl,
 }: Pick<ClusterInspectorProps, "summary" | "orbitById" | "onShow" | "onHover" | "trackerUrl"> & { label: number }) {
   const [shown, setShown] = useState(PAGE);
+  const [showHistory, setShowHistory] = useState(false);
   const outliers = isOutlierGroup(summary.algorithm, label);
   const reasons = useMemo(() => (outliers ? explainOutliers(summary.run, label) : null), [outliers, summary.run, label]);
 
@@ -149,7 +151,15 @@ function GroupDetails({
           Open in Tracker ↗
         </a>
         <span>{members.length > 10 ? `first 10 of ${members.length.toLocaleString()}` : ""}</span>
+        <button type="button" onClick={() => setShowHistory((v) => !v)} style={{ ...linkStyle, marginLeft: "auto" }}>
+          {showHistory ? "hide altitude history" : "altitude over time"}
+        </button>
       </div>
+      {showHistory && (
+        <div style={{ marginBottom: 8 }}>
+          <AltitudeHistory ids={members.map((m) => m.satelliteId)} />
+        </div>
+      )}
 
       <div style={{ color: MUTED, marginBottom: 2 }}>
         {reasons ? "Most unusual first:" : members.some((m) => m.confidence !== undefined) ? "Least certain first:" : "Members:"}

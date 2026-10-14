@@ -222,6 +222,59 @@ export function fetchSweep(body: SweepRequest): Promise<KSweepResponse | KDistan
   return postJson("/api/analytics/sweep", body, "Suggestion failed");
 }
 
+/** The model's view in 2D: PCA of the standardised features (coords in the same order as points). */
+export type ProjectionResponse = {
+  coords: [number, number][];
+  explainedVariance: number[];
+  /** loadings[component][feature]: how much each feature makes up PC1 / PC2. */
+  loadings: number[][];
+};
+
+export function fetchProjection(points: ClusteringFeaturePoint[]): Promise<ProjectionResponse> {
+  return postJson("/api/analytics/project", { points }, "Projection failed");
+}
+
+export type CloseApproach = {
+  a: { satelliteId: number; name: string };
+  b: { satelliteId: number; name: string };
+  missKm: number;
+  /** Time of closest approach (UTC millis). */
+  tcaMs: number;
+  relativeSpeedKmS: number;
+  withinThreshold: boolean;
+};
+
+export type CloseApproachesResponse = {
+  screened: number;
+  hours: number;
+  thresholdKm: number;
+  /** Pairs flying together (fresh launch trains, docked vehicles) that were left out. */
+  formationPairsSkipped: number;
+  /** All approaches under the threshold; `approaches` lists only the closest (up to 50). */
+  totalWithinThreshold: number;
+  approaches: CloseApproach[];
+};
+
+export function fetchCloseApproaches(body: {
+  satellites: { satelliteId: number; name: string; line1: string; line2: string }[];
+  startMs: number;
+  hours: number;
+  thresholdKm: number;
+}): Promise<CloseApproachesResponse> {
+  return postJson("/api/analytics/conjunctions", body, "Close-approach screening failed");
+}
+
+export type OrbitHistory = {
+  satelliteId: number;
+  name: string;
+  samples: { epoch: string; altitudeKm: number; inclinationDeg: number }[];
+};
+
+/** Stored orbit samples (one per TLE the backend has seen) for up to 500 satellites. */
+export function fetchOrbitHistory(ids: number[]): Promise<OrbitHistory[]> {
+  return postJson("/api/satellites/history", { ids }, "History request failed");
+}
+
 export function fetchOrbitChanges(ids: number[]): Promise<OrbitChangesResponse> {
   return postJson("/api/satellites/orbit-changes", { ids }, "Orbit-change scan failed");
 }

@@ -3,6 +3,7 @@ import type * as satellite from "satellite.js";
 import { getLiveState, getOrbitInfo } from "../../lib/orbitInfo";
 import type { Observer } from "../../lib/passes";
 import PassPredictions from "./PassPredictions";
+import AltitudeHistory from "./analytics/AltitudeHistory";
 
 export type SelectedSat = {
   satelliteId: number;
@@ -258,6 +259,9 @@ function SatelliteDetails({ sat, now, children }: { sat: SelectedSat; now: Date;
           <span style={{ color: "rgba(255,255,255,0.9)" }}>{value}</span>
         </div>
       ))}
+      <div style={{ gridColumn: "1 / -1", marginTop: 6, paddingTop: 6, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+        <AltitudeHistory ids={[sat.satelliteId]} />
+      </div>
       {children}
     </div>
   );

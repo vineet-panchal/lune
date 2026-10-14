@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { fetchOrbitChanges, type OrbitChange, type OrbitChangesResponse } from "../../../lib/api";
+import AltitudeHistory from "./AltitudeHistory";
 import { MUTED, TEXT, buttonStyle, chipStyle, errorStyle, hintStyle, linkStyle } from "./ui";
 
 export type ChangeKind = "raise" | "lower" | "plane_change" | "decaying";
@@ -29,6 +30,7 @@ export default function OrbitChanges({ loadedIds, focusedKind, onFocusKind, onSh
   const [result, setResult] = useState<OrbitChangesResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<number | null>(null);
 
   const scan = async () => {
     setBusy(true);
@@ -109,8 +111,17 @@ export default function OrbitChanges({ loadedIds, focusedKind, onFocusKind, onSh
                       style={{ display: "flex", gap: 6, alignItems: "baseline", padding: "2px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}
                     >
                       <span style={{ flex: 1, minWidth: 0 }}>
-                        <span style={{ color: TEXT }}>{s.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => setExpanded(expanded === s.satelliteId ? null : s.satelliteId)}
+                          aria-expanded={expanded === s.satelliteId}
+                          style={{ ...linkStyle, color: TEXT, fontSize: 10 }}
+                          title="Altitude over time"
+                        >
+                          {expanded === s.satelliteId ? "▾" : "▸"} {s.name}
+                        </button>
                         <span style={{ display: "block" }}>{describeChange(s, focusedKind)}</span>
+                        {expanded === s.satelliteId && <AltitudeHistory ids={[s.satelliteId]} />}
                       </span>
                       <button type="button" onClick={() => onShow(s.satelliteId)} style={linkStyle}>show</button>
                     </div>
