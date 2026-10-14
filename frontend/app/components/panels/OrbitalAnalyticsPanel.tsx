@@ -27,6 +27,11 @@ type OrbitalAnalyticsPanelProps = {
   clusterSummary: ClusterSummary | null;
   onRunClustering: (payload: ClusterRunPayload) => void;
   onClearClustering: () => void;
+  /**
+   * "sidebar": fills the dock's right-hand column (desktop / tablet); "sheet": inside the phone
+   * bottom sheet. Omitted: positions itself as a full-height sidebar.
+   */
+  variant?: "sidebar" | "sheet";
 };
 
 const ALGO_OPTIONS: { id: ClusterAlgorithm; label: string }[] = [
@@ -53,6 +58,7 @@ export default function OrbitalAnalyticsPanel({
   clusterSummary,
   onRunClustering,
   onClearClustering,
+  variant,
 }: OrbitalAnalyticsPanelProps) {
   const [algorithm, setAlgorithm] = useState<ClusterAlgorithm>("kmeans");
   const [k, setK] = useState(5);
@@ -106,13 +112,11 @@ export default function OrbitalAnalyticsPanel({
   return (
     <aside
       style={{
-        position: "absolute",
-        top: 0,
-        right: 0,
-        bottom: 0,
-        width: 392,
+        ...(variant
+          ? { position: "relative" as const, width: "100%", height: variant === "sidebar" ? "100%" : undefined }
+          : { position: "absolute" as const, top: 0, right: 0, bottom: 0, width: 392 }),
         boxSizing: "border-box",
-        padding: "72px 18px 20px",
+        padding: variant === "sheet" ? "12px 14px" : "72px 18px 20px",
         background: "linear-gradient(180deg, rgba(6,8,14,0.92) 0%, rgba(4,6,12,0.96) 100%)",
         borderLeft: "1px solid rgba(255,255,255,0.10)",
         color: "#e8ecf4",
