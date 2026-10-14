@@ -95,6 +95,7 @@ public class SatelliteCatalog {
 
     private final CelestrakApiClient celestrakApiClient;
     private final TleApiClient tleApiClient;
+    private final TleHistory tleHistory;
 
     private final Map<String, Snapshot> entries = new ConcurrentHashMap<>();
     private final Map<Integer, CelestrakSatelliteDto> byId = new ConcurrentHashMap<>();
@@ -104,9 +105,10 @@ public class SatelliteCatalog {
     @Value("${lune.catalog.cache-dir:${user.home}/.lune/tle-cache}")
     private Path cacheDir;
 
-    public SatelliteCatalog(CelestrakApiClient celestrakApiClient, TleApiClient tleApiClient) {
+    public SatelliteCatalog(CelestrakApiClient celestrakApiClient, TleApiClient tleApiClient, TleHistory tleHistory) {
         this.celestrakApiClient = celestrakApiClient;
         this.tleApiClient = tleApiClient;
+        this.tleHistory = tleHistory;
     }
 
     public static String groupKey(String group) {
@@ -285,6 +287,10 @@ public class SatelliteCatalog {
         entries.put(key, snapshot);
         for (CelestrakSatelliteDto s : snapshot.satellites()) {
             byId.put(s.getNoradCatId(), s);
+        }
+        // Partial downloads are recorded once complete, so a group isn't re-scanned for every page.
+        if (snapshot.complete()) {
+            tleHistory.record(snapshot.satellites());
         }
         if (persist) {
             writeToDisk(key, snapshot);

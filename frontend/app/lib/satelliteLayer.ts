@@ -78,6 +78,8 @@ export function createSatelliteLayer(
     label: (point: SatellitePoint) => string;
     /** The globe's current (possibly simulated) time, used to place dots between keyframes. */
     getTimeMs: () => number;
+    /** The satellite under the mouse pointer changed (null when there's none). */
+    onHover?: (point: SatellitePoint | null) => void;
   }
 ): SatelliteLayer {
   const geometry = new THREE.SphereGeometry(DOT_RADIUS, 8, 8);
@@ -344,6 +346,13 @@ export function createSatelliteLayer(
 
   let hoverFrame = 0;
   let lastMove: PointerEvent | null = null;
+  let hoveredId: number | null = null;
+  const reportHover = (p: SatellitePoint | null) => {
+    const id = p?.satelliteId ?? null;
+    if (id === hoveredId) return;
+    hoveredId = id;
+    options.onHover?.(p);
+  };
   let down: { x: number; y: number } | null = null;
 
   function updateHover() {
@@ -351,6 +360,7 @@ export function createSatelliteLayer(
     const e = lastMove;
     if (!e) return;
     const p = e.buttons === 0 ? pick(e.clientX, e.clientY) : null; // skip picking while dragging
+    reportHover(p);
     if (p) {
       tooltip.textContent = options.label(p);
       tooltip.style.left = `${e.clientX + 12}px`;
@@ -371,6 +381,7 @@ export function createSatelliteLayer(
   const onPointerLeave = (e: PointerEvent) => {
     if (e.pointerType === "touch") return; // fires after every tap; would hide the tap label at once
     lastMove = null;
+    reportHover(null);
     tooltip.style.display = "none";
     container.style.cursor = "";
   };

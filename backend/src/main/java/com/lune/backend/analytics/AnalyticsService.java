@@ -38,18 +38,30 @@ public class AnalyticsService {
     }
 
     public ClusterResponseDto cluster(ClusterRequestDto request) {
+        return post("/cluster", request, ClusterResponseDto.class);
+    }
+
+    /**
+     * Settings helpers (k sweeps, DBSCAN k-distance curve). Passed through as JSON: Spring adds nothing to
+     * these, so it doesn't need its own copy of their shape.
+     */
+    public String sweep(String requestJson) {
+        return post("/sweep", requestJson, String.class);
+    }
+
+    private <T> T post(String path, Object body, Class<T> responseType) {
         try {
-            ClusterResponseDto dto = webClient.post()
-                    .uri("/cluster")
+            T result = webClient.post()
+                    .uri(path)
                     .contentType(MediaType.APPLICATION_JSON)
-                    .bodyValue(request)
+                    .bodyValue(body)
                     .retrieve()
-                    .bodyToMono(ClusterResponseDto.class)
+                    .bodyToMono(responseType)
                     .block(Duration.ofSeconds(60));
-            if (dto == null) {
+            if (result == null) {
                 throw new IllegalStateException("Empty response from analytics service");
             }
-            return dto;
+            return result;
         }
         catch (WebClientResponseException e) {
             throw new IllegalStateException(

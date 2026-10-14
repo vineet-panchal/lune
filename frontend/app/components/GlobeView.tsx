@@ -1,12 +1,25 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback, type ReactNode } from "react";
-import { fetchClusterAnalytics, fetchSatellites } from "../lib/api";
+import {
+  fetchClusterAnalytics,
+  fetchSatellites,
+  fetchSweep,
+  type ClusterAnalyticsRequest,
+  type ClusteringFeaturePoint,
+} from "../lib/api";
 import { createSatelliteLayer, keyframeFromPoints, type Keyframe, type SatelliteLayer, type SatellitePoint } from "../lib/satelliteLayer";
 import { createStore, useStore, type Store } from "../lib/store";
 import { clusterLabelToColor } from "../lib/clusterLabels";
-import { clusterRunToCsv, downloadText, fileTimestamp, slug, type ClusterRun } from "../lib/clusterExport";
-import { featureNames, featureVector, ORBITAL_ELEMENTS, type FeatureSelection } from "../lib/clusterFeatures";
+import { clusterRunToCsv, downloadText, fileTimestamp, slug } from "../lib/clusterExport";
+import {
+  featureNames,
+  featureVector,
+  orbitQuantities,
+  ORBITAL_ELEMENTS,
+  type FeatureSelection,
+  type OrbitPoint,
+} from "../lib/clusterFeatures";
 import { computeStaticColoring, isColorMode, type ColorMode } from "../lib/colorModes";
 import { createSimClock } from "../lib/simClock";
 import { createPropagator, type Positions, type Propagator } from "../lib/propagator";
@@ -30,6 +43,7 @@ import OrbitalAnalyticsPanel, {
   type ClusterAlgorithm,
   type ClusterRunPayload,
   type ClusterSummary,
+  type SweepPanelRequest,
 } from "./panels/OrbitalAnalyticsPanel";
 import OrbitalViewPanel, { type ColorLegend } from "./panels/OrbitalViewPanel";
 import SelectedSatellitesPanel, { type SelectedSat } from "./panels/SelectedSatellitesPanel";
@@ -185,7 +199,10 @@ function formatFeaturesLine(selection: FeatureSelection): string {
 function formatClusterParamsLine(payload: ClusterRunPayload): string {
   switch (payload.algorithm) {
     case "kmeans":
+    case "gmm":
       return `k = ${payload.k}`;
+    case "hdbscan":
+      return `min cluster size = ${payload.minClusterSize}`;
     case "dbscan":
       return `eps = ${payload.eps.toFixed(2)}, min_samples = ${payload.minSamples}`;
     case "isolation_forest":
@@ -417,8 +434,16 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
   const globeRef = useRef<GlobeInstance | null>(null);
   const clusterBySatIdRef = useRef<Map<number, number> | null>(null);
   const clusterAlgorithmRef = useRef<ClusterAlgorithm | null>(null);
-  /** The last clustering run's inputs and labels, for CSV export. */
-  const lastClusterRunRef = useRef<ClusterRun | null>(null);
+  /** Satellites to keep bright while the rest are dimmed (a focused cluster or orbit-change group), or null. */
+  const focusIdsRef = useRef<Set<number> | null>(null);
+  const setFocusIds = useCallback((ids: number[] | null) => {
+    focusIdsRef.current = ids ? new Set(ids) : null;
+    propagateAllRef.current(satTlesRef.current, true);
+  }, []);
+  /** Satellite under the pointer on the globe, for the scatter plot to mark. */
+  const [globeHoverStore] = useState(() => createStore<number | null>(null));
+  /** Orbit values of every drawn satellite, for the scatter plot and cluster stats (Orbital Intelligence only). */
+  const [orbitPoints, setOrbitPoints] = useState<OrbitPoint[]>([]);
   const propagateAllRef = useRef<(tles: SatTle[], forceUiUpdate?: boolean) => void>(() => {});
   /** The time the globe shows: live by default, or paused / sped up / moved by the time controls. */
   const [clock] = useState(createSimClock);
@@ -489,6 +514,11 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     const fixed = staticColorsRef.current;
     return fixed ? fixed.get(satelliteId) ?? "#9e9e9e" : altitudeToColor(altitudeKm);
   }, []);
+  /** The colour a satellite has on the globe: its cluster's after a run, otherwise the colour mode's. */
+  const clusterColorOrDefault = useCallback((id: number, altKm: number) => {
+    const label = clusterBySatIdRef.current?.get(id);
+    return label !== undefined ? clusterLabelToColor(label, clusterAlgorithmRef.current) : satColor(id, altKm);
+  }, [satColor]);
   const selectedSatsRef = useRef<SelectedSat[]>([]);
   const orbitPathsRef = useRef<OrbitPath[]>([]);
   const satTlesRef = useRef<SatTle[]>([]);
@@ -756,6 +786,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
         onClick: (point) => toggleSelectionRef.current(point),
         getTimeMs: () => clock.nowMs(),
         label: (d) => `${d.name} — ${Math.round(d.altitudeKm ?? 0)} km`,
+        onHover: (point) => globeHoverStore.set(point?.satelliteId ?? null),
       });
       satelliteLayerRef.current = satelliteLayer;
       const dayNight = createDayNight(globe, () => clock.nowMs());
@@ -887,7 +918,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     setFollow(null);
     clusterBySatIdRef.current = null;
     clusterAlgorithmRef.current = null;
-    lastClusterRunRef.current = null;
+    focusIdsRef.current = null;
     setClusterSummary(null);
     setClusterError(null);
 
@@ -983,9 +1014,21 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
         }
       }
       return {
-        frame: { ids: slots.ids, names: slots.names, xyz, colors, dimmed: dayNightEnabledRef.current ? shadow : undefined },
+        frame: { ids: slots.ids, names: slots.names, xyz, colors, dimmed: dimmedSlots(tles, shadow) },
         stats: altitudeCounts ? { count: shown, altitudeCounts, lastUpdated: clock.now().toLocaleTimeString() } : null,
       };
+    }
+
+    /** Satellites in Earth's shadow (with day/night on) and, while a group is focused, everything outside it. */
+    function dimmedSlots(tles: SatTle[], shadow: Uint8Array): Uint8Array | undefined {
+      const focus = focusIdsRef.current;
+      const shade = dayNightEnabledRef.current;
+      if (!focus && !shade) return undefined;
+      const out = new Uint8Array(tles.length);
+      for (let i = 0; i < tles.length; i++) {
+        out[i] = (shade && shadow[i]) || (focus && !focus.has(tles[i].satelliteId)) ? 1 : 0;
+      }
+      return out;
     }
 
     /** Regular keyframe updates, every few seconds at real time and several times a second when sped up. */
@@ -1159,6 +1202,10 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     const now = clock.now();
     // Only satellites that can be placed on the globe count (old TLEs of re-entered satellites can't).
     const shown = satTlesRef.current.filter((t) => propagateToGeodetic(t.satrec, now));
+    if (mode === "orbital-intelligence") {
+      const nowMs = now.getTime();
+      setOrbitPoints(shown.map((t) => ({ satelliteId: t.satelliteId, name: t.name, ...orbitQuantities(t.satrec, nowMs) })));
+    }
     const coloring = computeStaticColoring(colorMode, shown, now);
     staticColorsRef.current = coloring?.colorById ?? null;
     setColorLegend(coloring ? { items: coloring.legend, categorical: coloring.categorical } : null);
@@ -1177,6 +1224,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
       setSelectedSats(nextSelected);
       setOrbitPaths(nextPaths);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mode is fixed per route
   }, [colorMode, tleVersion, satColor, clock]);
 
   // Shareable links: ?type=Internet&company=Starlink&sats=44713,45001&follow=44713&color=launch
@@ -1376,48 +1424,50 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     };
   }, [followId, setFollow]);
 
+  /**
+   * Every satellite drawn on the globe (propagates to a plausible position) as model input, with the chosen
+   * features at the globe's current time. Shared by clustering runs and the settings suggestions.
+   */
+  const buildClusterPoints = useCallback((features: FeatureSelection) => {
+    const now = clock.now();
+    const nowMs = now.getTime();
+    const geos: { lat: number; lng: number; alt: number }[] = [];
+    const points: ClusteringFeaturePoint[] = [];
+    for (const t of satTlesRef.current) {
+      const geo = propagateToGeodetic(t.satrec, now);
+      if (!geo) continue;
+      const vector = featureVector(features, t.satrec, geodeticToCartesianKm(geo.lat, geo.lng, geo.alt), nowMs);
+      if (!vector.every(Number.isFinite)) continue;
+      geos.push(geo);
+      points.push({ satelliteId: t.satelliteId, name: t.name, features: vector });
+    }
+    return { points, geos, nowMs };
+  }, [clock]);
+
   const runClustering = useCallback(async (payload: ClusterRunPayload) => {
-    const tles = satTlesRef.current;
-    if (tles.length < 2) return;
-    if (payload.algorithm === "kmeans" && payload.k < 2) return;
+    if (satTlesRef.current.length < 2) return;
+    if ((payload.algorithm === "kmeans" || payload.algorithm === "gmm") && payload.k < 2) return;
     setClusteringBusy(true);
     setClusterError(null);
     try {
-      const now = clock.now();
-      const nowMs = now.getTime();
-      // Only satellites drawn on the globe (propagate to a plausible position) are clustered, in either mode.
-      const geos: { lat: number; lng: number; alt: number }[] = [];
-      const points = tles.map((t) => {
-        const geo = propagateToGeodetic(t.satrec, now);
-        if (!geo) return null;
-        const features = featureVector(payload.features, t.satrec, geodeticToCartesianKm(geo.lat, geo.lng, geo.alt), nowMs);
-        if (!features.every(Number.isFinite)) return null;
-        geos.push(geo);
-        return { satelliteId: t.satelliteId, name: t.name, features };
-      }).filter((p): p is NonNullable<typeof p> => Boolean(p));
+      const { points, geos, nowMs } = buildClusterPoints(payload.features);
       if (points.length < 2) {
         throw new Error("Not enough propagated points available for clustering right now.");
       }
 
-      const body =
-        payload.algorithm === "kmeans"
-          ? {
-              algorithm: "kmeans" as const,
-              k: Math.min(payload.k, points.length),
-              points,
-            }
-          : payload.algorithm === "dbscan"
-            ? {
-                algorithm: "dbscan" as const,
-                dbscanEps: payload.eps,
-                dbscanMinSamples: Math.min(payload.minSamples, points.length),
-                points,
-              }
-            : {
-                algorithm: "isolation_forest" as const,
-                isolationContamination: payload.contamination,
-                points,
-              };
+      const body: ClusterAnalyticsRequest = (() => {
+        switch (payload.algorithm) {
+          case "kmeans":
+          case "gmm":
+            return { algorithm: payload.algorithm, k: Math.min(payload.k, points.length), points };
+          case "dbscan":
+            return { algorithm: "dbscan", dbscanEps: payload.eps, dbscanMinSamples: Math.min(payload.minSamples, points.length), points };
+          case "hdbscan":
+            return { algorithm: "hdbscan", hdbscanMinClusterSize: Math.min(payload.minClusterSize, points.length), points };
+          case "isolation_forest":
+            return { algorithm: "isolation_forest", isolationContamination: payload.contamination, points };
+        }
+      })();
 
       const resp = await fetchClusterAnalytics(body);
       const map = new Map<number, number>();
@@ -1429,54 +1479,95 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
       resp.labels.forEach((label) => {
         sizes[label] = (sizes[label] ?? 0) + 1;
       });
+      const paramsLine = formatClusterParamsLine(payload);
       setClusterSummary({
         algorithm: resolvedAlgo,
         nClusters: resp.nClusters,
         inertia: resp.inertia ?? null,
         sizes,
         noiseCount: resp.noiseCount ?? null,
-        paramsLine: formatClusterParamsLine(payload),
+        paramsLine,
         featureSet: payload.features.set,
         featuresLine: formatFeaturesLine(payload.features),
         computedAtMs: nowMs,
+        run: {
+          algorithm: resolvedAlgo,
+          paramsLine,
+          featureNames: featureNames(payload.features),
+          computedAtMs: nowMs,
+          rows: points.map((p, i) => ({
+            satelliteId: p.satelliteId,
+            name: p.name,
+            label: resp.labels[i] ?? 0,
+            confidence: resp.confidence?.[i],
+            features: p.features,
+            ...geos[i],
+          })),
+        },
       });
-      lastClusterRunRef.current = {
-        algorithm: resolvedAlgo,
-        paramsLine: formatClusterParamsLine(payload),
-        featureNames: featureNames(payload.features),
-        computedAtMs: nowMs,
-        rows: points.map((p, i) => ({
-          satelliteId: p.satelliteId,
-          name: p.name,
-          label: resp.labels[i] ?? 0,
-          features: p.features,
-          ...geos[i],
-        })),
-      };
-      propagateAllRef.current(tles, true);
+      setFocusIds(null);
+      propagateAllRef.current(satTlesRef.current, true);
     } catch (e) {
       console.error(e);
       setClusterError(e instanceof Error ? e.message : "Clustering request failed");
     } finally {
       setClusteringBusy(false);
     }
-  }, [clock]);
+  }, [buildClusterPoints, setFocusIds]);
+
+  const runSweep = useCallback(async (request: SweepPanelRequest) => {
+    const { points } = buildClusterPoints(request.features);
+    if (points.length < 3) throw new Error("Not enough satellites loaded to suggest settings.");
+    return request.kind === "kdistance"
+      ? fetchSweep({ kind: "kdistance", points, minSamples: request.minSamples })
+      : fetchSweep({ kind: request.kind, points, kMin: 2, kMax: Math.min(12, points.length - 1) });
+  }, [buildClusterPoints]);
 
   const clearClustering = useCallback(() => {
     clusterBySatIdRef.current = null;
     clusterAlgorithmRef.current = null;
-    lastClusterRunRef.current = null;
     setClusterSummary(null);
     setClusterError(null);
+    setFocusIds(null);
     propagateAllRef.current(satTlesRef.current, true);
-  }, []);
+  }, [setFocusIds]);
 
   const exportClusterCsv = useCallback(() => {
-    const run = lastClusterRunRef.current;
+    const run = clusterSummary?.run;
     if (!run) return;
     const filter = satCompany !== "All" ? `${satType}-${satCompany}` : satType;
     downloadText(clusterRunToCsv(run), `lune-${run.algorithm}-${slug(filter)}-${fileTimestamp(run.computedAtMs)}.csv`, "text/csv");
+  }, [clusterSummary, satType, satCompany]);
+
+  /** Select a satellite on this globe (if it isn't already) and keep the camera on it. */
+  const showSatellite = useCallback((id: number) => {
+    if (!selectedSatsRef.current.some((s) => s.satelliteId === id)) {
+      const tle = satTlesRef.current.find((t) => t.satelliteId === id);
+      const geo = tle ? propagateToGeodetic(tle.satrec, clock.now()) : null;
+      if (!tle || !geo) return;
+      toggleSelectionRef.current({
+        satelliteId: id, name: tle.name, latitude: geo.lat, longitude: geo.lng, altitudeKm: geo.alt,
+        color: clusterColorOrDefault(id, geo.alt),
+      });
+    }
+    if (selectedSatsRef.current.some((s) => s.satelliteId === id)) setFollow(id);
+  }, [clock, setFollow, clusterColorOrDefault]);
+
+  /** A Satellite Tracker link with these satellites selected (the tracker shows at most MAX_SELECTED). */
+  const trackerUrl = useCallback((ids: number[]) => {
+    const params = new URLSearchParams();
+    if (satType !== "Popular") params.set("type", satType);
+    if (satCompany !== "All") params.set("company", satCompany);
+    const picked = ids.slice(0, MAX_SELECTED);
+    if (picked.length > 0) params.set("sats", picked.join(","));
+    if (picked.length === 1) params.set("follow", String(picked[0]));
+    return `/?${params.toString().replace(/%2C/g, ",")}`;
   }, [satType, satCompany]);
+
+  /** Hovering a satellite in the scatter plot lights it up on the globe (the followed one otherwise). */
+  const hoverSatellite = useCallback((id: number | null) => {
+    satelliteLayerRef.current?.setHighlight(id ?? followIdRef.current);
+  }, []);
 
   const handleSearchSelect = useCallback((sat: any) => {
     const satrec = satellite.twoline2satrec(sat.line1, sat.line2);
@@ -1902,8 +1993,15 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
                     clusterSummary={clusterSummary}
                     onRunClustering={(payload) => void runClustering(payload)}
                     onClearClustering={clearClustering}
+                    onSweep={runSweep}
                     onExportCsv={exportClusterCsv}
                     getNow={getNow}
+                    orbitPoints={orbitPoints}
+                    onFocusSatellites={setFocusIds}
+                    onShowSatellite={showSatellite}
+                    onHoverSatellite={hoverSatellite}
+                    globeHover={globeHoverStore}
+                    trackerUrl={trackerUrl}
                   />
                 )}
               </WithStats>

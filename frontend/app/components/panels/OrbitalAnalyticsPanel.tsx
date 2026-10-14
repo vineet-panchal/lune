@@ -1,8 +1,13 @@
 "use client";
 
-import { useEffect, useState, type CSSProperties } from "react";
-import { fetchAnalyticsHealth } from "../../lib/api";
-import { clusterLabelName, clusterLabelToColor, type ClusterAlgorithm } from "../../lib/clusterLabels";
+import { useEffect, useMemo, useState } from "react";
+import {
+  fetchAnalyticsHealth,
+  type KDistanceResponse,
+  type KSweepResponse,
+} from "../../lib/api";
+import { ALGORITHM_LABELS, type ClusterAlgorithm } from "../../lib/clusterLabels";
+import type { ClusterRun } from "../../lib/clusterExport";
 import {
   DEFAULT_ELEMENTS,
   ORBITAL_ELEMENTS,
@@ -10,7 +15,14 @@ import {
   type FeatureSelection,
   type FeatureSet,
   type OrbitalElement,
+  type OrbitPoint,
 } from "../../lib/clusterFeatures";
+import type { ReadableStore } from "../../lib/store";
+import ClusterInspector from "./analytics/ClusterInspector";
+import OrbitChanges, { type ChangeKind } from "./analytics/OrbitChanges";
+import OrbitScatter from "./analytics/OrbitScatter";
+import { KDistanceChart, KSweepChart } from "./analytics/SweepChart";
+import { buttonStyle, chipStyle, errorStyle, hintStyle, sectionStyle, sectionTitleStyle } from "./analytics/ui";
 
 export type { ClusterAlgorithm };
 
@@ -26,6 +38,8 @@ export type ClusterSummary = {
   featuresLine: string;
   /** The (simulated) moment whose positions were clustered. */
   computedAtMs: number;
+  /** Every satellite sent to the model, its label and features (inspector, scatter colours, CSV). */
+  run: ClusterRun;
 };
 
 /** How often to ask whether the Python service is reachable. */
@@ -35,10 +49,67 @@ const NOW_REFRESH_MS = 1000;
 type Health = "checking" | "online" | "offline";
 
 export type ClusterRunPayload = (
-  | { algorithm: "kmeans"; k: number }
+  | { algorithm: "kmeans" | "gmm"; k: number }
   | { algorithm: "dbscan"; eps: number; minSamples: number }
+  | { algorithm: "hdbscan"; minClusterSize: number }
   | { algorithm: "isolation_forest"; contamination: number }
 ) & { features: FeatureSelection };
+
+/** A settings suggestion: score k = 2..12, or DBSCAN's k-distance curve. */
+export type SweepPanelRequest =
+  | { kind: "kmeans" | "gmm"; features: FeatureSelection }
+  | { kind: "kdistance"; features: FeatureSelection; minSamples: number };
+
+type OrbitalAnalyticsPanelProps = {
+  satelliteSampleCount: number;
+  satelliteTotalCount: number;
+  loadingCatalog: boolean;
+  clusteringBusy: boolean;
+  clusterError: string | null;
+  clusterSummary: ClusterSummary | null;
+  onRunClustering: (payload: ClusterRunPayload) => void;
+  onClearClustering: () => void;
+  onSweep: (request: SweepPanelRequest) => Promise<KSweepResponse | KDistanceResponse>;
+  /** Downloads the last run as CSV. */
+  onExportCsv: () => void;
+  /** The globe's current (possibly simulated) time, to tell when a run's positions are out of date. */
+  getNow: () => Date;
+  /** Orbit values of every satellite drawn on the globe. */
+  orbitPoints: OrbitPoint[];
+  /** Keep these satellites bright on the globe and dim the rest (null: all normal). */
+  onFocusSatellites: (ids: number[] | null) => void;
+  /** Select a satellite on this globe and follow it. */
+  onShowSatellite: (id: number) => void;
+  /** Light a satellite up on the globe while the pointer is over it in the panel (null to stop). */
+  onHoverSatellite: (id: number | null) => void;
+  /** Satellite under the pointer on the globe. */
+  globeHover: ReadableStore<number | null>;
+  /** A Satellite Tracker link with (up to 10 of) these satellites selected. */
+  trackerUrl: (ids: number[]) => string;
+  /**
+   * "sidebar": fills the dock's right-hand column (desktop / tablet); "sheet": inside the phone
+   * bottom sheet. Omitted: positions itself as a full-height sidebar.
+   */
+  variant?: "sidebar" | "sheet";
+};
+
+const ALGO_OPTIONS: { id: ClusterAlgorithm; description: string }[] = [
+  { id: "kmeans", description: "K-means splits the satellites into k groups around k centres." },
+  {
+    id: "gmm",
+    description:
+      "A Gaussian mixture fits k overlapping groups of any shape and says how sure it is of each satellite's group.",
+  },
+  { id: "dbscan", description: "DBSCAN finds dense groups and marks satellites in sparse areas as noise." },
+  {
+    id: "hdbscan",
+    description: "HDBSCAN finds dense groups of different densities on its own: no radius to tune, only a minimum size.",
+  },
+  {
+    id: "isolation_forest",
+    description: "Isolation forest flags satellites that look unlike the bulk of the fleet (anomalies).",
+  },
+];
 
 const FEATURE_SET_OPTIONS: { id: FeatureSet; label: string; description: string }[] = [
   {
@@ -55,32 +126,10 @@ const FEATURE_SET_OPTIONS: { id: FeatureSet; label: string; description: string 
   },
 ];
 
-type OrbitalAnalyticsPanelProps = {
-  satelliteSampleCount: number;
-  satelliteTotalCount: number;
-  loadingCatalog: boolean;
-  clusteringBusy: boolean;
-  clusterError: string | null;
-  clusterSummary: ClusterSummary | null;
-  onRunClustering: (payload: ClusterRunPayload) => void;
-  onClearClustering: () => void;
-  /** Downloads the last run as CSV. */
-  onExportCsv: () => void;
-  /** The globe's current (possibly simulated) time, to tell when a run's positions are out of date. */
-  getNow: () => Date;
-  /**
-   * "sidebar": fills the dock's right-hand column (desktop / tablet); "sheet": inside the phone
-   * bottom sheet. Omitted: positions itself as a full-height sidebar.
-   */
-  variant?: "sidebar" | "sheet";
-};
-
-const ALGO_OPTIONS: { id: ClusterAlgorithm; label: string }[] = [
-  { id: "kmeans", label: "K-means" },
-  { id: "dbscan", label: "DBSCAN" },
-  { id: "isolation_forest", label: "Isolation forest" },
-];
-
+type Focus =
+  | { kind: "cluster"; label: number; run: ClusterRun }
+  | { kind: "changes"; change: ChangeKind; ids: number[] }
+  | null;
 
 export default function OrbitalAnalyticsPanel({
   satelliteSampleCount,
@@ -91,8 +140,15 @@ export default function OrbitalAnalyticsPanel({
   clusterSummary,
   onRunClustering,
   onClearClustering,
+  onSweep,
   onExportCsv,
   getNow,
+  orbitPoints,
+  onFocusSatellites,
+  onShowSatellite,
+  onHoverSatellite,
+  globeHover,
+  trackerUrl,
   variant,
 }: OrbitalAnalyticsPanelProps) {
   const [polledHealth, setHealth] = useState<Health>("checking");
@@ -137,52 +193,98 @@ export default function OrbitalAnalyticsPanel({
   const [k, setK] = useState(5);
   const [dbscanEps, setDbscanEps] = useState(0.4);
   const [dbscanMinSamples, setDbscanMinSamples] = useState(5);
+  const [hdbscanMinClusterSize, setHdbscanMinClusterSize] = useState(30);
   const [isolationContamination, setIsolationContamination] = useState(0.06);
 
   const maxK = Math.max(2, Math.min(12, satelliteSampleCount || 2));
   const kEffective = Math.min(k, maxK);
-
-  const canRunKMeans =
-    !loadingCatalog &&
-    !clusteringBusy &&
-    satelliteSampleCount >= 2 &&
-    kEffective >= 2 &&
-    kEffective <= satelliteSampleCount;
-
-  const canRunDbscan =
-    !loadingCatalog && !clusteringBusy && satelliteSampleCount >= 2 && dbscanMinSamples <= satelliteSampleCount;
-
-  const canRunIsolation =
-    !loadingCatalog && !clusteringBusy && satelliteSampleCount >= 2;
+  const minSamplesEffective = Math.min(dbscanMinSamples, satelliteSampleCount || 2);
 
   const canRun =
     featuresReady &&
-    (algorithm === "kmeans" ? canRunKMeans : algorithm === "dbscan" ? canRunDbscan : canRunIsolation);
+    !loadingCatalog &&
+    !clusteringBusy &&
+    satelliteSampleCount >= 2 &&
+    ((algorithm !== "kmeans" && algorithm !== "gmm") || (kEffective >= 2 && kEffective <= satelliteSampleCount));
 
   const run = () => {
     if (!canRun) return;
-    if (algorithm === "kmeans") {
-      onRunClustering({ algorithm: "kmeans", k: Math.min(kEffective, Math.max(2, satelliteSampleCount)), features });
-      return;
+    switch (algorithm) {
+      case "kmeans":
+      case "gmm":
+        return onRunClustering({ algorithm, k: kEffective, features });
+      case "dbscan":
+        return onRunClustering({ algorithm, eps: dbscanEps, minSamples: minSamplesEffective, features });
+      case "hdbscan":
+        return onRunClustering({ algorithm, minClusterSize: hdbscanMinClusterSize, features });
+      case "isolation_forest":
+        return onRunClustering({ algorithm, contamination: isolationContamination, features });
     }
-    if (algorithm === "dbscan") {
-      onRunClustering({
-        algorithm: "dbscan",
-        eps: dbscanEps,
-        minSamples: Math.min(dbscanMinSamples, satelliteSampleCount),
-        features,
-      });
-      return;
-    }
-    onRunClustering({ algorithm: "isolation_forest", contamination: isolationContamination, features });
   };
 
-  const algoTitle =
-    algorithm === "kmeans"
-      ? "K-means partitions satellites into k groups."
-      : algorithm === "dbscan"
-        ? "DBSCAN finds density-based clusters and marks sparse points as noise."
-        : "Isolation forest highlights points that look unlike the bulk of the fleet (anomalies).";
+  // Settings suggestions: only shown while they still match the model, features (and DBSCAN's min points).
+  const sweepKind = algorithm === "kmeans" || algorithm === "gmm" ? algorithm : algorithm === "dbscan" ? "kdistance" : null;
+  const sweepKey = JSON.stringify({ sweepKind, features, minSamples: sweepKind === "kdistance" ? minSamplesEffective : null });
+  const [sweep, setSweep] = useState<{ key: string; data: KSweepResponse | KDistanceResponse } | null>(null);
+  const [sweepBusy, setSweepBusy] = useState(false);
+  const [sweepError, setSweepError] = useState<{ key: string; message: string } | null>(null);
+  const suggest = async () => {
+    if (!sweepKind || !featuresReady) return;
+    const key = sweepKey;
+    setSweepBusy(true);
+    setSweepError(null);
+    try {
+      const data = await onSweep(
+        sweepKind === "kdistance" ? { kind: "kdistance", features, minSamples: minSamplesEffective } : { kind: sweepKind, features }
+      );
+      setSweep({ key, data });
+      if (data.kind === "kdistance") setDbscanEps(data.suggestedEps);
+      else setK(data.suggestedK);
+    } catch (e) {
+      setSweepError({ key, message: e instanceof Error ? e.message : "Suggestion failed" });
+    } finally {
+      setSweepBusy(false);
+    }
+  };
+  const sweepShown = sweep?.key === sweepKey ? sweep.data : null;
+
+  // Focus: one cluster or one kind of orbit change stays bright on the globe and in the scatter plot.
+  const [focusState, setFocus] = useState<Focus>(null);
+  const focus = focusState?.kind === "cluster" && focusState.run !== clusterSummary?.run ? null : focusState;
+  const focusIds = useMemo(() => {
+    if (!focus) return null;
+    if (focus.kind === "changes") return new Set(focus.ids);
+    return new Set(focus.run.rows.filter((r) => r.label === focus.label).map((r) => r.satelliteId));
+  }, [focus]);
+  useEffect(() => {
+    onFocusSatellites(focusIds ? [...focusIds] : null);
+  }, [focusIds, onFocusSatellites]);
+
+  const orbitById = useMemo(() => new Map(orbitPoints.map((p) => [p.satelliteId, p])), [orbitPoints]);
+  const labelById = useMemo(
+    () => (clusterSummary ? new Map(clusterSummary.run.rows.map((r) => [r.satelliteId, r.label])) : null),
+    [clusterSummary]
+  );
+  const loadedIds = useMemo(() => orbitPoints.map((p) => p.satelliteId), [orbitPoints]);
+
+  const slider = (label: string, value: number, display: string, min: number, max: number, step: number, onChange: (v: number) => void) => (
+    <>
+      <label style={{ display: "block", fontSize: 11, color: "rgba(200,210,230,0.65)", marginBottom: 6 }}>{label}</label>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(parseFloat(e.target.value))}
+          disabled={satelliteSampleCount < 2}
+          style={{ flex: "1 1 140px", minWidth: 120 }}
+        />
+        <span style={{ minWidth: 40, textAlign: "right", color: "rgba(200,210,230,0.85)" }}>{display}</span>
+      </div>
+    </>
+  );
 
   return (
     <aside
@@ -211,16 +313,8 @@ export default function OrbitalAnalyticsPanel({
         (scikit-learn) via Spring Boot; the globe colours update from the returned labels.
       </p>
 
-      <section
-        style={{
-          padding: 14,
-          borderRadius: 10,
-          background: "rgba(255,255,255,0.04)",
-          border: "1px solid rgba(255,255,255,0.08)",
-          marginBottom: 14,
-        }}
-      >
-        <div style={{ fontWeight: 600, marginBottom: 10, color: "#c5d5f1" }}>Compare satellites by</div>
+      <section style={sectionStyle}>
+        <div style={sectionTitleStyle}>Compare satellites by</div>
         <div role="tablist" aria-label="Features" style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
           {FEATURE_SET_OPTIONS.map((opt) => (
             <button
@@ -236,7 +330,7 @@ export default function OrbitalAnalyticsPanel({
             </button>
           ))}
         </div>
-        <p style={{ margin: featureSet === "elements" ? "0 0 10px" : 0, fontSize: 11, color: "rgba(190,200,220,0.7)", lineHeight: 1.45 }}>
+        <p style={{ ...hintStyle, marginBottom: featureSet === "elements" ? 10 : 0 }}>
           {FEATURE_SET_OPTIONS.find((o) => o.id === featureSet)?.description}
         </p>
         {featureSet === "elements" && (
@@ -261,21 +355,9 @@ export default function OrbitalAnalyticsPanel({
         )}
       </section>
 
-      <section
-        style={{
-          padding: 14,
-          borderRadius: 10,
-          background: "rgba(255,255,255,0.04)",
-          border: "1px solid rgba(255,255,255,0.08)",
-          marginBottom: 14,
-        }}
-      >
-        <div style={{ fontWeight: 600, marginBottom: 10, color: "#c5d5f1" }}>Model</div>
-        <div
-          role="tablist"
-          aria-label="Clustering model"
-          style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}
-        >
+      <section style={sectionStyle}>
+        <div style={sectionTitleStyle}>Model</div>
+        <div role="tablist" aria-label="Clustering model" style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
           {ALGO_OPTIONS.map((opt) => (
             <button
               key={opt.id}
@@ -286,103 +368,51 @@ export default function OrbitalAnalyticsPanel({
               disabled={clusteringBusy}
               style={chipStyle(algorithm === opt.id, clusteringBusy)}
             >
-              {opt.label}
+              {ALGORITHM_LABELS[opt.id]}
             </button>
           ))}
         </div>
 
-        <p style={{ margin: "0 0 12px", fontSize: 11, color: "rgba(190,200,220,0.7)", lineHeight: 1.45 }}>
-          {algoTitle}
-        </p>
+        <p style={{ ...hintStyle, marginBottom: 12 }}>{ALGO_OPTIONS.find((o) => o.id === algorithm)?.description}</p>
 
-        {algorithm === "kmeans" && (
-          <>
-            <label style={{ display: "block", fontSize: 11, color: "rgba(200,210,230,0.65)", marginBottom: 6 }}>
-              Clusters (k)
-            </label>
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-              <input
-                type="range"
-                min={2}
-                max={maxK}
-                step={1}
-                value={kEffective}
-                onChange={(e) => setK(parseInt(e.target.value, 10))}
-                disabled={satelliteSampleCount < 2}
-                style={{ flex: "1 1 140px", minWidth: 120 }}
-              />
-              <span style={{ minWidth: 28, textAlign: "right", color: "rgba(200,210,230,0.85)" }}>
-                {kEffective}
-              </span>
-            </div>
-          </>
-        )}
-
+        {(algorithm === "kmeans" || algorithm === "gmm") &&
+          slider("Clusters (k)", kEffective, String(kEffective), 2, maxK, 1, (v) => setK(v))}
         {algorithm === "dbscan" && (
           <>
-            <label style={{ display: "block", fontSize: 11, color: "rgba(200,210,230,0.65)", marginBottom: 6 }}>
-              Neighborhood radius (eps, standardized feature space)
-            </label>
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
-              <input
-                type="range"
-                min={0.15}
-                max={1.2}
-                step={0.05}
-                value={dbscanEps}
-                onChange={(e) => setDbscanEps(parseFloat(e.target.value))}
-                disabled={satelliteSampleCount < 2}
-                style={{ flex: "1 1 140px", minWidth: 120 }}
-              />
-              <span style={{ minWidth: 40, textAlign: "right", color: "rgba(200,210,230,0.85)" }}>
-                {dbscanEps.toFixed(2)}
-              </span>
-            </div>
-            <label style={{ display: "block", fontSize: 11, color: "rgba(200,210,230,0.65)", marginBottom: 6 }}>
-              Min. points to form a cluster
-            </label>
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-              <input
-                type="range"
-                min={2}
-                max={Math.max(2, Math.min(20, satelliteSampleCount || 2))}
-                step={1}
-                value={Math.min(dbscanMinSamples, satelliteSampleCount || 2)}
-                onChange={(e) => setDbscanMinSamples(parseInt(e.target.value, 10))}
-                disabled={satelliteSampleCount < 2}
-                style={{ flex: "1 1 140px", minWidth: 120 }}
-              />
-              <span style={{ minWidth: 28, textAlign: "right", color: "rgba(200,210,230,0.85)" }}>
-                {Math.min(dbscanMinSamples, satelliteSampleCount || 2)}
-              </span>
-            </div>
+            {slider("Neighbourhood radius (eps, in standardised units)", dbscanEps, dbscanEps.toFixed(2), 0.05, 3, 0.01, setDbscanEps)}
+            {slider("Min. points to form a cluster", minSamplesEffective, String(minSamplesEffective), 2, Math.max(2, Math.min(50, satelliteSampleCount || 2)), 1, setDbscanMinSamples)}
           </>
         )}
+        {algorithm === "hdbscan" &&
+          slider("Smallest group worth calling a cluster", hdbscanMinClusterSize, String(hdbscanMinClusterSize), 5, 300, 5, setHdbscanMinClusterSize)}
+        {algorithm === "isolation_forest" &&
+          slider("Expected fraction of outliers (contamination)", isolationContamination, `${(100 * isolationContamination).toFixed(0)}%`, 0.02, 0.18, 0.01, setIsolationContamination)}
 
-        {algorithm === "isolation_forest" && (
-          <>
-            <label style={{ display: "block", fontSize: 11, color: "rgba(200,210,230,0.65)", marginBottom: 6 }}>
-              Expected fraction of outliers (contamination)
-            </label>
-            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-              <input
-                type="range"
-                min={0.02}
-                max={0.18}
-                step={0.01}
-                value={isolationContamination}
-                onChange={(e) => setIsolationContamination(parseFloat(e.target.value))}
-                disabled={satelliteSampleCount < 2}
-                style={{ flex: "1 1 140px", minWidth: 120 }}
-              />
-              <span style={{ minWidth: 44, textAlign: "right", color: "rgba(200,210,230,0.85)" }}>
-                {(100 * isolationContamination).toFixed(0)}%
-              </span>
-            </div>
-          </>
+        {sweepKind && (
+          <div style={{ marginBottom: 10 }}>
+            <button
+              type="button"
+              onClick={() => void suggest()}
+              disabled={sweepBusy || clusteringBusy || !featuresReady || satelliteSampleCount < 3}
+              style={buttonStyle(!sweepBusy && !clusteringBusy && featuresReady && satelliteSampleCount >= 3)}
+              title={sweepKind === "kdistance" ? "Measure how close satellites are to their neighbours" : "Try k = 2 to 12 and score each"}
+            >
+              {sweepBusy ? "Working…" : sweepKind === "kdistance" ? "Suggest eps" : "Suggest k"}
+            </button>
+            {sweepError?.key === sweepKey && <div style={{ ...errorStyle, marginTop: 8 }}>{sweepError.message}</div>}
+            {sweepShown && (
+              <div style={{ marginTop: 8 }}>
+                {sweepShown.kind === "kdistance" ? (
+                  <KDistanceChart result={sweepShown} eps={dbscanEps} onPick={setDbscanEps} />
+                ) : (
+                  <KSweepChart result={sweepShown} k={kEffective} onPick={setK} />
+                )}
+              </div>
+            )}
+          </div>
         )}
 
-        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button
             type="button"
             disabled={!canRun}
@@ -405,16 +435,7 @@ export default function OrbitalAnalyticsPanel({
             type="button"
             disabled={clusteringBusy || !clusterSummary}
             onClick={onClearClustering}
-            style={{
-              padding: "8px 14px",
-              borderRadius: 8,
-              border: "1px solid rgba(255,255,255,0.14)",
-              background: "rgba(255,255,255,0.06)",
-              color: clusterSummary && !clusteringBusy ? "rgba(230,236,246,0.85)" : "rgba(255,255,255,0.35)",
-              cursor: clusterSummary && !clusteringBusy ? "pointer" : "not-allowed",
-              fontFamily: "inherit",
-              fontSize: 11,
-            }}
+            style={{ ...buttonStyle(Boolean(clusterSummary) && !clusteringBusy), padding: "8px 14px" }}
           >
             Clear coloring
           </button>
@@ -425,37 +446,13 @@ export default function OrbitalAnalyticsPanel({
         </div>
       </section>
 
-      {clusterError && (
-        <div
-          style={{
-            padding: "10px 12px",
-            borderRadius: 8,
-            background: "rgba(160, 48, 48, 0.2)",
-            border: "1px solid rgba(255,120,120,0.35)",
-            color: "#ffd6d6",
-            marginBottom: 12,
-            fontSize: 11,
-            lineHeight: 1.45,
-          }}
-        >
-          {clusterError}
-        </div>
-      )}
+      {clusterError && <div style={{ ...errorStyle, fontSize: 11, marginBottom: 12 }}>{clusterError}</div>}
 
       {clusterSummary && (
-        <section
-          style={{
-            padding: 14,
-            borderRadius: 10,
-            background: "rgba(255,255,255,0.03)",
-            border: "1px solid rgba(255,255,255,0.07)",
-          }}
-        >
+        <section style={{ ...sectionStyle, background: "rgba(255,255,255,0.03)" }}>
           <div style={{ fontWeight: 600, marginBottom: 8, color: "#c5d5f1" }}>Last run</div>
           <div style={{ color: "rgba(210,220,235,0.8)", marginBottom: 4 }}>
-            {clusterSummary.algorithm === "kmeans" && "K-means"}
-            {clusterSummary.algorithm === "dbscan" && "DBSCAN"}
-            {clusterSummary.algorithm === "isolation_forest" && "Isolation forest"}
+            {ALGORITHM_LABELS[clusterSummary.algorithm]}
             <span style={{ color: "rgba(180,190,210,0.65)" }}> · {clusterSummary.paramsLine}</span>
             {clusterSummary.inertia != null && (
               <span style={{ color: "rgba(180,190,210,0.65)" }}>
@@ -489,38 +486,60 @@ export default function OrbitalAnalyticsPanel({
               since. Run the model again for current groupings.
             </div>
           )}
-          {clusterSummary.algorithm !== "kmeans" && (
+          {(clusterSummary.algorithm === "dbscan" || clusterSummary.algorithm === "hdbscan") && (
             <div style={{ fontSize: 10, color: "rgba(170,182,200,0.65)", marginBottom: 8 }}>
-              {clusterSummary.algorithm === "dbscan" &&
-                `Density clusters found: ${clusterSummary.nClusters}${
-                  clusterSummary.noiseCount != null ? ` · noise points: ${clusterSummary.noiseCount}` : ""
-                }`}
-              {clusterSummary.algorithm === "isolation_forest" &&
-                clusterSummary.noiseCount != null &&
-                `Flagged as anomalous: ${clusterSummary.noiseCount} satellites`}
+              Density clusters found: {clusterSummary.nClusters}
+              {clusterSummary.noiseCount != null ? ` · noise points: ${clusterSummary.noiseCount}` : ""}
             </div>
           )}
-          <ClusterLegend summary={clusterSummary} />
+          {clusterSummary.algorithm === "isolation_forest" && clusterSummary.noiseCount != null && (
+            <div style={{ fontSize: 10, color: "rgba(170,182,200,0.65)", marginBottom: 8 }}>
+              Flagged as anomalous: {clusterSummary.noiseCount} satellites
+            </div>
+          )}
+          <ClusterInspector
+            summary={clusterSummary}
+            orbitById={orbitById}
+            focusedLabel={focus?.kind === "cluster" ? focus.label : null}
+            onFocusLabel={(label) => setFocus(label === null ? null : { kind: "cluster", label, run: clusterSummary.run })}
+            onShow={onShowSatellite}
+            onHover={onHoverSatellite}
+            trackerUrl={trackerUrl}
+          />
           <button
             type="button"
             onClick={onExportCsv}
             title="Download every satellite with its label and the features the model saw"
-            style={{
-              marginTop: 12,
-              padding: "6px 12px",
-              borderRadius: 8,
-              border: "1px solid rgba(255,255,255,0.14)",
-              background: "rgba(255,255,255,0.06)",
-              color: "rgba(230,236,246,0.85)",
-              cursor: "pointer",
-              fontFamily: "inherit",
-              fontSize: 11,
-            }}
+            style={{ ...buttonStyle(), marginTop: 12 }}
           >
             Export CSV
           </button>
         </section>
       )}
+
+      <section style={sectionStyle}>
+        <div style={sectionTitleStyle}>Explore orbits</div>
+        <OrbitScatter
+          points={orbitPoints}
+          labelById={labelById}
+          algorithm={clusterSummary?.algorithm ?? null}
+          focusIds={focusIds}
+          globeHover={globeHover}
+          onHover={onHoverSatellite}
+          onPick={onShowSatellite}
+        />
+      </section>
+
+      <section style={sectionStyle}>
+        <div style={sectionTitleStyle}>Orbit changes</div>
+        <OrbitChanges
+          loadedIds={loadedIds}
+          focusedKind={focus?.kind === "changes" ? focus.change : null}
+          onFocusKind={(change, ids) => setFocus(change === null ? null : { kind: "changes", change, ids })}
+          onShow={onShowSatellite}
+          onHover={onHoverSatellite}
+        />
+      </section>
 
       {health === "offline" && (
         <section style={{ marginTop: 16, color: "rgba(170,182,204,0.7)", fontSize: 10, lineHeight: 1.55 }}>
@@ -531,21 +550,6 @@ export default function OrbitalAnalyticsPanel({
       )}
     </aside>
   );
-}
-
-/** A selectable pill (feature set, model). */
-function chipStyle(active: boolean, disabled: boolean): CSSProperties {
-  return {
-    padding: "6px 10px",
-    borderRadius: 8,
-    border: active ? "1px solid rgba(123, 164, 232, 0.75)" : "1px solid rgba(255,255,255,0.12)",
-    background: active ? "rgba(86, 132, 214, 0.35)" : "rgba(255,255,255,0.05)",
-    color: active ? "#e8f0ff" : "rgba(200,210,230,0.75)",
-    cursor: disabled ? "not-allowed" : "pointer",
-    fontFamily: "inherit",
-    fontSize: 11,
-    fontWeight: 600,
-  };
 }
 
 const HEALTH_STYLE: Record<Health, { label: string; color: string; title: string }> = {
@@ -560,35 +564,6 @@ function HealthBadge({ health }: { health: Health }) {
     <span title={style.title} style={{ fontSize: 10, color: style.color, whiteSpace: "nowrap" }}>
       ● {style.label}
     </span>
-  );
-}
-
-/** Each label's colour on the globe, its name and how many satellites it holds. */
-function ClusterLegend({ summary }: { summary: ClusterSummary }) {
-  const entries = Object.entries(summary.sizes)
-    .map(([label, count]) => [Number(label), count] as const)
-    .sort((a, b) => a[0] - b[0]);
-  const total = entries.reduce((sum, [, count]) => sum + count, 0) || 1;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      {entries.map(([label, count]) => (
-        <div key={label} style={{ display: "flex", alignItems: "center", gap: 8, color: "rgba(200,210,230,0.82)" }}>
-          <span
-            style={{
-              width: 10,
-              height: 10,
-              borderRadius: 3,
-              background: clusterLabelToColor(label, summary.algorithm),
-              flexShrink: 0,
-            }}
-          />
-          <span style={{ flex: 1, minWidth: 0 }}>{clusterLabelName(summary.algorithm, label)}</span>
-          <span style={{ color: "rgba(180,190,210,0.65)", whiteSpace: "nowrap" }}>
-            {count.toLocaleString()} ({((count / total) * 100).toFixed(1)}%)
-          </span>
-        </div>
-      ))}
-    </div>
   );
 }
 

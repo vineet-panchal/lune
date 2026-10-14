@@ -3,6 +3,7 @@ package com.lune.backend.analytics;
 import com.lune.backend.analytics.dto.ClusterRequestDto;
 import com.lune.backend.analytics.dto.ClusterResponseDto;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -40,6 +41,18 @@ public class AnalyticsController {
         try {
             ClusterResponseDto result = analyticsService.cluster(body);
             return ResponseEntity.ok(result);
+        }
+        catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /** Settings helpers for the models; see the analytics service's /sweep. */
+    @PostMapping(value = "/sweep", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> sweep(@RequestBody String body) {
+        try {
+            return ResponseEntity.ok(analyticsService.sweep(body));
         }
         catch (IllegalStateException e) {
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)

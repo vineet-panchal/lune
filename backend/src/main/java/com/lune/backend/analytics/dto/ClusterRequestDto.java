@@ -11,6 +11,7 @@ public record ClusterRequestDto(
         Double dbscanEps,
         Integer dbscanMinSamples,
         Double isolationContamination,
+        Integer hdbscanMinClusterSize,
         List<ClusterPointDto> points
 ) {
 }
