@@ -25,6 +25,7 @@ public class SatelliteController {
     private static final double DEFAULT_TRAIL_KM = 30.0;
 
     private final SatelliteService satelliteService;
+    private final OrbitChangeService orbitChangeService;
 
     /**
      * List satellites (paginated). Data from TLE catalog.
@@ -105,5 +106,15 @@ public class SatelliteController {
                 .map(Optional::get)
                 .toList();
         return ResponseEntity.ok(results);
+    }
+
+    /**
+     * Orbit changes (manoeuvres, decay) for the given satellites, from the TLE history the backend has collected.
+     * POST because the UI sends every loaded satellite (up to ~12k IDs).
+     */
+    @PostMapping(value = "/orbit-changes", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<OrbitChangesResponseDto> orbitChanges(@RequestBody OrbitChangesRequestDto request) {
+        List<Integer> ids = request.ids() == null ? List.of() : request.ids();
+        return ResponseEntity.ok(orbitChangeService.find(ids.stream().limit(MAX_PAGE_SIZE).toList()));
     }
 }
