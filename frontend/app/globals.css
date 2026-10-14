@@ -23,3 +23,18 @@ body {
   color: var(--foreground);
   font-family: var(--font-sans), Arial, Helvetica, sans-serif;
 }
+/* The globe page fills the screen; nothing should scroll or bounce behind it on touch devices. */
+html,
+body {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/* Panels shown inside the phone bottom sheet: drop their floating widths and fill the sheet. */
+.lune-sheet-content > * {
+  max-width: none !important;
+  min-width: 0 !important;
+  width: 100% !important;
+  max-height: none !important;
+  box-sizing: border-box;
+}

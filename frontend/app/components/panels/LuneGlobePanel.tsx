@@ -1,4 +1,8 @@
+import { useStore, type ReadableStore } from "../../lib/store";
+
 type LuneGlobePanelProps = {
+  /** Positioned by the panel dock instead of itself. */
+  docked?: boolean;
   searchSuggestions: SearchSuggestion[];
   activePanel: "search" | "filter";
   onOpenSearchPanel: () => void;
@@ -15,9 +19,9 @@ type LuneGlobePanelProps = {
   companyDescriptions: Record<string, string>;
   onSatTypeChange: (value: string) => void;
   onSatCompanyChange: (value: string) => void;
-  satellitesLength: number;
+  /** Satellites drawn and last update time; read from a store so only this panel re-renders. */
+  statsStore: ReadableStore<{ count: number; lastUpdated: string | null }>;
   satCount: number;
-  lastUpdated: string | null;
   dataSource: string | null;
   tleUpdatedAt: string | null;
   loading: boolean;
@@ -29,6 +33,7 @@ type SearchSuggestion = {
 };
 
 export default function LuneGlobePanel({
+  docked = false,
   activePanel,
   onOpenSearchPanel,
   onOpenFilterPanel,
@@ -45,9 +50,8 @@ export default function LuneGlobePanel({
   companyDescriptions,
   onSatTypeChange,
   onSatCompanyChange,
-  satellitesLength,
+  statsStore,
   satCount,
-  lastUpdated,
   dataSource,
   tleUpdatedAt,
   loading,
@@ -55,9 +59,7 @@ export default function LuneGlobePanel({
   return (
     <div
       style={{
-        position: "absolute",
-        top: 12,
-        left: 12,
+        ...(docked ? {} : { position: "absolute" as const, top: 12, left: 12, zIndex: 11 }),
         padding: "10px 12px",
         borderRadius: 10,
         background: "rgba(0,0,0,0.55)",
@@ -67,7 +69,6 @@ export default function LuneGlobePanel({
         fontSize: 12,
         lineHeight: 1.4,
         maxWidth: 360,
-        zIndex: 11,
         pointerEvents: "auto",
       }}
     >
@@ -219,8 +220,7 @@ export default function LuneGlobePanel({
         )}
       </div>
 
-      <div>Satellites: {satellitesLength}{satCount > 0 && satellitesLength < satCount ? ` / ${satCount}` : ""}</div>
-      <div>Update: {lastUpdated ?? "--"}</div>
+      <CatalogCounts statsStore={statsStore} satCount={satCount} />
       {dataSource && (
         <div style={{ marginTop: 2, fontSize: 11, color: dataSource.includes("tle-api") ? "#ffa726" : "#66bb6a" }}>
           Source: {dataSource.split("+").map((s) => (s === "celestrak" ? "CelesTrak" : "TLE API")).join(" + ")}
@@ -247,4 +247,15 @@ function formatAge(iso: string): string {
   const hours = Math.round(minutes / 60);
   if (hours < 48) return `updated ${hours} h ago`;
   return `updated ${Math.round(hours / 24)} days ago`;
+}
+
+/** "Satellites: n / total" and the last update time, re-rendered on their own every few seconds. */
+function CatalogCounts({ statsStore, satCount }: { statsStore: ReadableStore<{ count: number; lastUpdated: string | null }>; satCount: number }) {
+  const { count, lastUpdated } = useStore(statsStore);
+  return (
+    <>
+      <div>Satellites: {count}{satCount > 0 && count < satCount ? ` / ${satCount}` : ""}</div>
+      <div>Update: {lastUpdated ?? "--"}</div>
+    </>
+  );
 }

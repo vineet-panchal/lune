@@ -11,16 +11,20 @@ import {
   MdNightlight,
   MdPublic,
   MdWbSunny,
+  MdWbTwilight,
 } from "react-icons/md";
 
 type VisualizationPanelProps = {
   /** Extra space reserved on the right (e.g. full-height analytics panel). */
   rightGutterPx?: number;
+  /** Placed in a bottom-left column by the parent (under the time panel) instead of positioning itself. */
+  docked?: boolean;
   isDayMode: boolean;
   showAtmosphere: boolean;
   showGraticules: boolean;
   showBorders: boolean;
   showClouds: boolean;
+  dayNight: boolean;
   mapStyleLabel: string;
   spaceStyleLabel: string;
   atmosphereAltitude: number;
@@ -32,6 +36,7 @@ type VisualizationPanelProps = {
   onToggleBorders: () => void;
   onCycleMapStyle: () => void;
   onToggleClouds: () => void;
+  onToggleDayNight: () => void;
   onCycleSpaceStyle: () => void;
   onUpdateAtmosphereColorPreset: (color: string) => void;
   onUpdateAtmosphereAltitude: (value: number) => void;
@@ -120,11 +125,13 @@ function ToolbarIconButton({
 
 export default function VisualizationPanel({
   rightGutterPx = 0,
+  docked = false,
   isDayMode,
   showAtmosphere,
   showGraticules,
   showBorders,
   showClouds,
+  dayNight,
   mapStyleLabel,
   spaceStyleLabel,
   atmosphereAltitude,
@@ -136,6 +143,7 @@ export default function VisualizationPanel({
   onToggleBorders,
   onCycleMapStyle,
   onToggleClouds,
+  onToggleDayNight,
   onCycleSpaceStyle,
   onUpdateAtmosphereColorPreset,
   onUpdateAtmosphereAltitude,
@@ -146,9 +154,7 @@ export default function VisualizationPanel({
   return (
     <div
       style={{
-        position: "absolute",
-        bottom: 16,
-        left: 16,
+        ...(docked ? { pointerEvents: "auto" as const } : { position: "absolute" as const, bottom: 16, left: 16 }),
         padding: "12px 16px",
         borderRadius: 12,
         background: "rgba(10,10,14,0.82)",
@@ -204,6 +210,13 @@ export default function VisualizationPanel({
           active
           onClick={onCycleMapStyle}
           Icon={MdPublic}
+        />
+
+        <ToolbarIconButton
+          label={dayNight ? "Day/Night Shading Off" : "Day/Night Shading On"}
+          active={dayNight}
+          onClick={onToggleDayNight}
+          Icon={MdWbTwilight}
         />
 
         <ToolbarIconButton
