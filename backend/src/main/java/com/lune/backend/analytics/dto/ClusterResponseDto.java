@@ -10,6 +10,8 @@ public record ClusterResponseDto(
         int nClusters,
         Double inertia,
         String algorithm,
-        Integer noiseCount
+        Integer noiseCount,
+        /** Gaussian mixture only: each point's highest membership probability (0..1); null otherwise. */
+        List<Double> confidence
 ) {
 }
