@@ -137,15 +137,67 @@ export type ClusterAnalyticsResponse = {
   inertia: number | null;
   algorithm?: string;
   noiseCount?: number | null;
+  /** Gaussian mixture only: each point's highest membership probability (0..1). */
+  confidence?: number[] | null;
 };
 
 export type ClusterAnalyticsRequest = {
-  algorithm: "kmeans" | "dbscan" | "isolation_forest";
+  algorithm: "kmeans" | "gmm" | "dbscan" | "hdbscan" | "isolation_forest";
   points: ClusteringFeaturePoint[];
+  /** k-means and Gaussian mixture: number of groups. */
   k?: number;
   dbscanEps?: number;
   dbscanMinSamples?: number;
+  hdbscanMinClusterSize?: number;
   isolationContamination?: number;
+};
+
+/** Scores for each k (k-means: inertia, Gaussian mixture: BIC; both: silhouette, higher is better). */
+export type KSweepResponse = {
+  kind: "kmeans" | "gmm";
+  results: { k: number; silhouette: number | null; inertia?: number; bic?: number }[];
+  suggestedK: number;
+};
+
+/** Each satellite's distance to its minSamples-th neighbour, sorted; the bend suggests DBSCAN's eps. */
+export type KDistanceResponse = {
+  kind: "kdistance";
+  minSamples: number;
+  fractions: number[];
+  distances: number[];
+  suggestedEps: number;
+};
+
+export type SweepRequest =
+  | { kind: "kmeans" | "gmm"; points: ClusteringFeaturePoint[]; kMin: number; kMax: number }
+  | { kind: "kdistance"; points: ClusteringFeaturePoint[]; minSamples: number };
+
+export type OrbitEvent = {
+  type: "raise" | "lower" | "plane_change";
+  from: string;
+  to: string;
+  deltaAltitudeKm: number;
+  deltaInclinationDeg: number;
+};
+
+export type OrbitChange = {
+  satelliteId: number;
+  name: string;
+  samples: number;
+  latestAltitudeKm: number;
+  altitudeRateKmPerDay: number | null;
+  decaying: boolean;
+  daysToReentry: number | null;
+  events: OrbitEvent[];
+};
+
+export type OrbitChangesResponse = {
+  requested: number;
+  /** How many of the requested satellites have at least two stored TLEs to compare. */
+  withHistory: number;
+  /** When the backend started recording TLE history (ISO), or null if it hasn't yet. */
+  historySince: string | null;
+  satellites: OrbitChange[];
 };
 
 /** Whether Spring can reach the Python analytics service. False on any failure, including Spring being down. */
@@ -160,16 +212,29 @@ export async function fetchAnalyticsHealth(): Promise<boolean> {
   }
 }
 
-export async function fetchClusterAnalytics(
-  body: ClusterAnalyticsRequest
-): Promise<ClusterAnalyticsResponse> {
-  const res = await fetch(`${API_BASE}/api/analytics/cluster`, {
+export function fetchClusterAnalytics(body: ClusterAnalyticsRequest): Promise<ClusterAnalyticsResponse> {
+  return postJson("/api/analytics/cluster", body, "Clustering failed");
+}
+
+export function fetchSweep(body: SweepRequest & { kind: "kdistance" }): Promise<KDistanceResponse>;
+export function fetchSweep(body: SweepRequest & { kind: "kmeans" | "gmm" }): Promise<KSweepResponse>;
+export function fetchSweep(body: SweepRequest): Promise<KSweepResponse | KDistanceResponse> {
+  return postJson("/api/analytics/sweep", body, "Suggestion failed");
+}
+
+export function fetchOrbitChanges(ids: number[]): Promise<OrbitChangesResponse> {
+  return postJson("/api/satellites/orbit-changes", { ids }, "Orbit-change scan failed");
+}
+
+/** POST JSON; on failure, throws the server's {"error": ...} message if it sent one. */
+async function postJson<T>(path: string, body: unknown, failure: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    let msg = `Clustering failed (${res.status})`;
+    let msg = `${failure} (${res.status})`;
     try {
       const j = await res.json();
       if (j && typeof j.error === "string") msg = j.error;

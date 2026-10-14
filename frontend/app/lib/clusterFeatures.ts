@@ -84,6 +84,39 @@ export function featureVector(
   return out;
 }
 
+/** Orbit values for the scatter plot and cluster stats (degrees, km, minutes). */
+export type OrbitQuantities = {
+  altitudeKm: number;
+  inclinationDeg: number;
+  raanDeg: number;
+  eccentricity: number;
+  periodMin: number;
+};
+
+export type OrbitAxis = keyof OrbitQuantities;
+
+/** One drawn satellite's orbit values, for the scatter plot and cluster stats. */
+export type OrbitPoint = OrbitQuantities & { satelliteId: number; name: string };
+
+export const ORBIT_AXES: { id: OrbitAxis; label: string; unit: string }[] = [
+  { id: "altitudeKm", label: "Altitude", unit: "km" },
+  { id: "inclinationDeg", label: "Inclination", unit: "°" },
+  { id: "raanDeg", label: "Orbital plane (RAAN)", unit: "°" },
+  { id: "eccentricity", label: "Eccentricity", unit: "" },
+  { id: "periodMin", label: "Period", unit: "min" },
+];
+
+export function orbitQuantities(satrec: satellite.SatRec, atMs: number): OrbitQuantities {
+  const raan = (raanAt(satrec, atMs) * RAD_TO_DEG) % 360;
+  return {
+    altitudeKm: meanAltitudeKm(satrec),
+    inclinationDeg: satrec.inclo * RAD_TO_DEG,
+    raanDeg: raan < 0 ? raan + 360 : raan,
+    eccentricity: satrec.ecco,
+    periodMin: (2 * Math.PI) / satrec.no,
+  };
+}
+
 /** Semi-major axis from the mean motion, minus Earth's radius. */
 function meanAltitudeKm(satrec: satellite.SatRec): number {
   const meanMotionRadS = satrec.no / 60; // no is radians per minute

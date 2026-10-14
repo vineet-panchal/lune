@@ -12,6 +12,8 @@ export type ClusterRun = {
     satelliteId: number;
     name: string;
     label: number;
+    /** Gaussian mixture only: how sure the model is of the label (0..1). */
+    confidence?: number;
     features: number[];
     lat: number;
     lng: number;
@@ -21,11 +23,13 @@ export type ClusterRun = {
 
 export function clusterRunToCsv(run: ClusterRun): string {
   const at = new Date(run.computedAtMs).toISOString();
+  const hasConfidence = run.rows.some((r) => r.confidence !== undefined);
   const header = [
     "norad_id",
     "name",
     "label",
     "group",
+    ...(hasConfidence ? ["confidence"] : []),
     ...run.featureNames.map((f) => `feature_${f}`),
     "latitude_deg",
     "longitude_deg",
@@ -42,6 +46,7 @@ export function clusterRunToCsv(run: ClusterRun): string {
         csvField(r.name),
         r.label,
         csvField(clusterLabelName(run.algorithm, r.label)),
+        ...(hasConfidence ? [r.confidence ?? ""] : []),
         ...r.features.map((v) => String(Number(v.toPrecision(8)))),
         r.lat.toFixed(5),
         r.lng.toFixed(5),
