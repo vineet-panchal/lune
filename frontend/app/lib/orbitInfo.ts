@@ -1,4 +1,5 @@
 import * as satellite from "satellite.js";
+import { isPlausibleAltitude } from "./propagateBatch";
 
 /** Orbit facts derived from a satellite's TLE. These only change when the TLE is refreshed. */
 export type OrbitInfo = {
@@ -56,6 +57,7 @@ export function getLiveState(satrec: satellite.SatRec, date: Date): LiveState | 
     return null;
   }
   const geo = satellite.eciToGeodetic(pv.position, satellite.gstime(date));
+  if (!isPlausibleAltitude(geo.height, satrec)) return null;
   const v = pv.velocity;
   return {
     lat: satellite.degreesLat(geo.latitude),

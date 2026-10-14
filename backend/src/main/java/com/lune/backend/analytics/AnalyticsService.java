@@ -22,6 +22,21 @@ public class AnalyticsService {
                 .build();
     }
 
+    /** Whether the Python service answers its /health endpoint. Short timeout: the UI polls this. */
+    public boolean isHealthy() {
+        try {
+            webClient.get()
+                    .uri("/health")
+                    .retrieve()
+                    .toBodilessEntity()
+                    .block(Duration.ofSeconds(2));
+            return true;
+        }
+        catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     public ClusterResponseDto cluster(ClusterRequestDto request) {
         try {
             ClusterResponseDto dto = webClient.post()

@@ -5,6 +5,27 @@ import { inEarthShadow, sunEci } from "./passes";
 export const GLOBE_RADIUS = 100;
 export const EARTH_RADIUS_KM = 6371;
 
+/** Below this a satellite has re-entered; SGP4 keeps "propagating" decayed TLEs into the ground. */
+const MIN_PLAUSIBLE_ALTITUDE_KM = 80;
+/** Slack above the TLE's own apogee: SGP4 perturbations and drag terms move a real satellite tens of km, not this far. */
+const APOGEE_MARGIN_KM = 500;
+const APOGEE_MARGIN_FRACTION = 0.1;
+const MU_KM3_S2 = 398600.4418; // Earth's gravitational parameter
+const SGP4_EARTH_RADIUS_KM = 6378.137;
+
+/**
+ * Whether a propagated altitude can be a real satellite. SGP4 doesn't always flag broken or long-stale TLEs as
+ * errors; it can return positions underground or far beyond the orbit the TLE describes (up to ~10¹⁴ km), which
+ * would draw stray dots and skew clustering. A real satellite never climbs much above its TLE's apogee.
+ */
+export function isPlausibleAltitude(altitudeKm: number, satrec: satellite.SatRec): boolean {
+  if (!(altitudeKm >= MIN_PLAUSIBLE_ALTITUDE_KM)) return false; // also rejects NaN
+  const meanMotionRadS = satrec.no / 60; // no is radians per minute
+  const semiMajorKm = Math.cbrt(MU_KM3_S2 / (meanMotionRadS * meanMotionRadS));
+  const apogeeKm = semiMajorKm * (1 + satrec.ecco) - SGP4_EARTH_RADIUS_KM;
+  return altitudeKm <= apogeeKm * (1 + APOGEE_MARGIN_FRACTION) + APOGEE_MARGIN_KM;
+}
+
 /**
  * Positions of many satellites at one moment, in two packed arrays (one entry per satellite, in order):
  *   geo: [lat°, lng°, altitude km]
@@ -26,13 +47,14 @@ export function propagateBatch(
     const k = i * 3;
     const rec = satrecs[i];
     const pv = rec ? satellite.propagate(rec, date) : null;
-    if (!pv || !pv.position || typeof pv.position === "boolean") {
+    const position = pv && pv.position && typeof pv.position !== "boolean" ? pv.position : null;
+    const g = position ? satellite.eciToGeodetic(position, gmst) : null;
+    if (!rec || !position || !g || !isPlausibleAltitude(g.height, rec)) {
       geo[k] = geo[k + 1] = geo[k + 2] = NaN;
       xyz[k] = xyz[k + 1] = xyz[k + 2] = NaN;
       continue;
     }
-    shadow[i] = inEarthShadow(pv.position, sun) ? 1 : 0;
-    const g = satellite.eciToGeodetic(pv.position, gmst);
+    shadow[i] = inEarthShadow(position, sun) ? 1 : 0;
     const lat = satellite.degreesLat(g.latitude);
     const lng = satellite.degreesLong(g.longitude);
     geo[k] = lat;
