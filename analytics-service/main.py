@@ -15,9 +15,8 @@ app = FastAPI(title="Lune Analytics", version="0.1.0")
 class ClusterPoint(BaseModel):
     satellite_id: int = Field(alias="satelliteId")
     name: str
-    altitude_km: float = Field(alias="altitudeKm")
-    inclination_deg: float = Field(alias="inclinationDeg")
-    mean_motion_rpd: float = Field(alias="meanMotionRpd")
+    # Whatever the client compares satellites by (position x/y/z, orbital elements, ...), same order for every point.
+    features: list[float] = Field(min_length=1)
 
     model_config = {"populate_by_name": True}
 
@@ -45,13 +44,13 @@ class ClusterRequest(BaseModel):
 
 
 def _feature_matrix(points: list[ClusterPoint]) -> np.ndarray:
-    return np.asarray(
-        [
-            [p.altitude_km, p.inclination_deg, p.mean_motion_rpd]
-            for p in points
-        ],
-        dtype=float,
-    )
+    width = len(points[0].features)
+    if any(len(p.features) != width for p in points):
+        raise HTTPException(status_code=400, detail="Every point must have the same number of features")
+    x = np.asarray([p.features for p in points], dtype=float)
+    if not np.isfinite(x).all():
+        raise HTTPException(status_code=400, detail="Features must be finite numbers")
+    return x
 
 
 @app.get("/health")

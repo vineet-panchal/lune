@@ -4,41 +4,37 @@ import { clusterLabelName, type ClusterAlgorithm } from "./clusterLabels";
 export type ClusterRun = {
   algorithm: ClusterAlgorithm;
   paramsLine: string;
-  /** The (simulated) moment whose positions were clustered. */
+  /** Column names of the features the model saw, in order (see lib/clusterFeatures). */
+  featureNames: string[];
+  /** The (simulated) moment whose positions or orbits were clustered. */
   computedAtMs: number;
   rows: {
     satelliteId: number;
     name: string;
     label: number;
-    /** The features the model saw: Earth-centred position in km. */
-    xKm: number;
-    yKm: number;
-    zKm: number;
+    features: number[];
     lat: number;
     lng: number;
     alt: number;
   }[];
 };
 
-const HEADER = [
-  "norad_id",
-  "name",
-  "label",
-  "group",
-  "x_km",
-  "y_km",
-  "z_km",
-  "latitude_deg",
-  "longitude_deg",
-  "altitude_km",
-  "algorithm",
-  "params",
-  "positions_at_utc",
-];
-
 export function clusterRunToCsv(run: ClusterRun): string {
   const at = new Date(run.computedAtMs).toISOString();
-  const lines = [HEADER.join(",")];
+  const header = [
+    "norad_id",
+    "name",
+    "label",
+    "group",
+    ...run.featureNames.map((f) => `feature_${f}`),
+    "latitude_deg",
+    "longitude_deg",
+    "altitude_km",
+    "algorithm",
+    "params",
+    "computed_at_utc",
+  ];
+  const lines = [header.join(",")];
   for (const r of run.rows) {
     lines.push(
       [
@@ -46,9 +42,7 @@ export function clusterRunToCsv(run: ClusterRun): string {
         csvField(r.name),
         r.label,
         csvField(clusterLabelName(run.algorithm, r.label)),
-        r.xKm.toFixed(3),
-        r.yKm.toFixed(3),
-        r.zKm.toFixed(3),
+        ...r.features.map((v) => String(Number(v.toPrecision(8)))),
         r.lat.toFixed(5),
         r.lng.toFixed(5),
         r.alt.toFixed(3),
