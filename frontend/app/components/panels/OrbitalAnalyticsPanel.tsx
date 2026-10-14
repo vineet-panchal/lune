@@ -1,8 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { fetchAnalyticsHealth } from "../../lib/api";
+import { clusterLabelName, clusterLabelToColor, type ClusterAlgorithm } from "../../lib/clusterLabels";
 
-export type ClusterAlgorithm = "kmeans" | "dbscan" | "isolation_forest";
+export type { ClusterAlgorithm };
 
 export type ClusterSummary = {
   algorithm: ClusterAlgorithm;
@@ -11,7 +13,20 @@ export type ClusterSummary = {
   sizes: Record<number, number>;
   noiseCount: number | null;
   paramsLine: string;
+  /** The (simulated) moment whose positions were clustered. */
+  computedAtMs: number;
 };
+
+/** How often to ask whether the Python service is reachable. */
+const HEALTH_POLL_MS = 15_000;
+/**
+ * Features are positions at one moment; LEO satellites cover ~2,000 km in 5 minutes, so after that the
+ * colours no longer describe where the dots are.
+ */
+const STALE_AFTER_MS = 5 * 60_000;
+const NOW_REFRESH_MS = 1000;
+
+type Health = "checking" | "online" | "offline";
 
 export type ClusterRunPayload =
   | { algorithm: "kmeans"; k: number }
@@ -27,6 +42,10 @@ type OrbitalAnalyticsPanelProps = {
   clusterSummary: ClusterSummary | null;
   onRunClustering: (payload: ClusterRunPayload) => void;
   onClearClustering: () => void;
+  /** Downloads the last run as CSV. */
+  onExportCsv: () => void;
+  /** The globe's current (possibly simulated) time, to tell when a run's positions are out of date. */
+  getNow: () => Date;
   /**
    * "sidebar": fills the dock's right-hand column (desktop / tablet); "sheet": inside the phone
    * bottom sheet. Omitted: positions itself as a full-height sidebar.
@@ -40,14 +59,6 @@ const ALGO_OPTIONS: { id: ClusterAlgorithm; label: string }[] = [
   { id: "isolation_forest", label: "Isolation forest" },
 ];
 
-function formatSizeLabel(algorithm: ClusterAlgorithm, label: number): string {
-  if (algorithm === "dbscan" && label === -1) return "Noise (unclustered)";
-  if (algorithm === "isolation_forest") {
-    if (label === -1) return "Outliers (anomalous)";
-    return "Inliers (typical)";
-  }
-  return `Cluster ${label}`;
-}
 
 export default function OrbitalAnalyticsPanel({
   satelliteSampleCount,
@@ -58,8 +69,38 @@ export default function OrbitalAnalyticsPanel({
   clusterSummary,
   onRunClustering,
   onClearClustering,
+  onExportCsv,
+  getNow,
   variant,
 }: OrbitalAnalyticsPanelProps) {
+  const [polledHealth, setHealth] = useState<Health>("checking");
+  useEffect(() => {
+    let cancelled = false;
+    const check = () =>
+      fetchAnalyticsHealth().then((ok) => {
+        if (!cancelled) setHealth(ok ? "online" : "offline");
+      });
+    void check();
+    const timer = window.setInterval(check, HEALTH_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+  // A run that just failed to reach the service is fresher news than the last poll.
+  const health: Health = clusterError?.startsWith("Cannot reach analytics service") ? "offline" : polledHealth;
+
+  // Only tick while there's a result whose age matters.
+  const [nowMs, setNowMs] = useState<number | null>(null);
+  useEffect(() => {
+    if (!clusterSummary) return;
+    const update = () => setNowMs(getNow().getTime());
+    update();
+    const timer = window.setInterval(update, NOW_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, [clusterSummary, getNow]);
+  const stale = clusterSummary !== null && nowMs !== null && Math.abs(nowMs - clusterSummary.computedAtMs) > STALE_AFTER_MS;
+
   const [algorithm, setAlgorithm] = useState<ClusterAlgorithm>("kmeans");
   const [k, setK] = useState(5);
   const [dbscanEps, setDbscanEps] = useState(0.4);
@@ -127,8 +168,9 @@ export default function OrbitalAnalyticsPanel({
         backdropFilter: "blur(10px)",
       }}
     >
-      <div style={{ fontWeight: 700, fontSize: 13, letterSpacing: 0.6, marginBottom: 6 }}>
-        Orbital analytics
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
+        <span style={{ fontWeight: 700, fontSize: 13, letterSpacing: 0.6 }}>Orbital analytics</span>
+        <HealthBadge health={health} />
       </div>
       <p style={{ margin: "0 0 16px", color: "rgba(220,228,240,0.72)", lineHeight: 1.5 }}>
         Each satellite is a point in Earth-centered Cartesian space (x, y, z in km) from its current propagated
@@ -340,7 +382,7 @@ export default function OrbitalAnalyticsPanel({
           }}
         >
           <div style={{ fontWeight: 600, marginBottom: 8, color: "#c5d5f1" }}>Last run</div>
-          <div style={{ color: "rgba(210,220,235,0.8)", marginBottom: 8 }}>
+          <div style={{ color: "rgba(210,220,235,0.8)", marginBottom: 4 }}>
             {clusterSummary.algorithm === "kmeans" && "K-means"}
             {clusterSummary.algorithm === "dbscan" && "DBSCAN"}
             {clusterSummary.algorithm === "isolation_forest" && "Isolation forest"}
@@ -352,6 +394,26 @@ export default function OrbitalAnalyticsPanel({
               </span>
             )}
           </div>
+          <div style={{ fontSize: 10, color: "rgba(170,182,200,0.65)", marginBottom: 8 }}>
+            Positions at {formatRunTime(clusterSummary.computedAtMs)}
+          </div>
+          {stale && (
+            <div
+              style={{
+                padding: "8px 10px",
+                borderRadius: 8,
+                background: "rgba(255, 183, 77, 0.12)",
+                border: "1px solid rgba(255, 183, 77, 0.35)",
+                color: "#ffd8a8",
+                fontSize: 10,
+                lineHeight: 1.45,
+                marginBottom: 8,
+              }}
+            >
+              Out of date: the globe is {formatGap(Math.abs((nowMs ?? 0) - clusterSummary.computedAtMs))} away from this
+              run, and the satellites have moved since. Run the model again for current groupings.
+            </div>
+          )}
           {clusterSummary.algorithm !== "kmeans" && (
             <div style={{ fontSize: 10, color: "rgba(170,182,200,0.65)", marginBottom: 8 }}>
               {clusterSummary.algorithm === "dbscan" &&
@@ -363,26 +425,90 @@ export default function OrbitalAnalyticsPanel({
                 `Flagged as anomalous: ${clusterSummary.noiseCount} satellites`}
             </div>
           )}
-          <ul style={{ margin: 0, paddingLeft: 18, color: "rgba(200,210,230,0.82)", lineHeight: 1.55 }}>
-            {Object.entries(clusterSummary.sizes)
-              .sort((a, b) => Number(a[0]) - Number(b[0]))
-              .map(([labelStr, count]) => {
-                const label = Number(labelStr);
-                return (
-                  <li key={labelStr}>
-                    {formatSizeLabel(clusterSummary.algorithm, label)}: {count} satellites
-                  </li>
-                );
-              })}
-          </ul>
+          <ClusterLegend summary={clusterSummary} />
+          <button
+            type="button"
+            onClick={onExportCsv}
+            title="Download every satellite with its label and the features the model saw"
+            style={{
+              marginTop: 12,
+              padding: "6px 12px",
+              borderRadius: 8,
+              border: "1px solid rgba(255,255,255,0.14)",
+              background: "rgba(255,255,255,0.06)",
+              color: "rgba(230,236,246,0.85)",
+              cursor: "pointer",
+              fontFamily: "inherit",
+              fontSize: 11,
+            }}
+          >
+            Export CSV
+          </button>
         </section>
       )}
 
-      <section style={{ marginTop: 16, color: "rgba(170,182,204,0.55)", fontSize: 10, lineHeight: 1.55 }}>
-        Tip: start the Python analytics service on port 8000 and point Spring at{" "}
-        <span style={{ color: "rgba(200,210,230,0.75)" }}>lune.analytics.base-url</span> so the API can reach
-        scikit-learn.
-      </section>
+      {health === "offline" && (
+        <section style={{ marginTop: 16, color: "rgba(170,182,204,0.7)", fontSize: 10, lineHeight: 1.55 }}>
+          Start the Python analytics service: run{" "}
+          <span style={{ color: "rgba(200,210,230,0.85)" }}>uvicorn main:app --port 8000</span> in analytics-service,
+          or point Spring at a running one with <span style={{ color: "rgba(200,210,230,0.85)" }}>lune.analytics.base-url</span>.
+        </section>
+      )}
     </aside>
   );
+}
+
+const HEALTH_STYLE: Record<Health, { label: string; color: string; title: string }> = {
+  checking: { label: "Checking…", color: "rgba(200,210,230,0.55)", title: "Checking whether the analytics service is reachable" },
+  online: { label: "Online", color: "#66bb6a", title: "The Python analytics service is reachable" },
+  offline: { label: "Offline", color: "#ff8a80", title: "The Python analytics service can't be reached; models won't run" },
+};
+
+function HealthBadge({ health }: { health: Health }) {
+  const style = HEALTH_STYLE[health];
+  return (
+    <span title={style.title} style={{ fontSize: 10, color: style.color, whiteSpace: "nowrap" }}>
+      ● {style.label}
+    </span>
+  );
+}
+
+/** Each label's colour on the globe, its name and how many satellites it holds. */
+function ClusterLegend({ summary }: { summary: ClusterSummary }) {
+  const entries = Object.entries(summary.sizes)
+    .map(([label, count]) => [Number(label), count] as const)
+    .sort((a, b) => a[0] - b[0]);
+  const total = entries.reduce((sum, [, count]) => sum + count, 0) || 1;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      {entries.map(([label, count]) => (
+        <div key={label} style={{ display: "flex", alignItems: "center", gap: 8, color: "rgba(200,210,230,0.82)" }}>
+          <span
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: 3,
+              background: clusterLabelToColor(label, summary.algorithm),
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ flex: 1, minWidth: 0 }}>{clusterLabelName(summary.algorithm, label)}</span>
+          <span style={{ color: "rgba(180,190,210,0.65)", whiteSpace: "nowrap" }}>
+            {count.toLocaleString()} ({((count / total) * 100).toFixed(1)}%)
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function formatRunTime(ms: number): string {
+  return new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function formatGap(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} days`;
 }

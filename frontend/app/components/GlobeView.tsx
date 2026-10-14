@@ -4,9 +4,12 @@ import { useEffect, useRef, useState, useCallback, type ReactNode } from "react"
 import { fetchClusterAnalytics, fetchSatellites } from "../lib/api";
 import { createSatelliteLayer, keyframeFromPoints, type Keyframe, type SatelliteLayer, type SatellitePoint } from "../lib/satelliteLayer";
 import { createStore, useStore, type Store } from "../lib/store";
+import { clusterLabelToColor } from "../lib/clusterLabels";
+import { clusterRunToCsv, downloadText, fileTimestamp, slug, type ClusterRun } from "../lib/clusterExport";
 import { computeStaticColoring, isColorMode, type ColorMode } from "../lib/colorModes";
 import { createSimClock } from "../lib/simClock";
 import { createPropagator, type Positions, type Propagator } from "../lib/propagator";
+import { isPlausibleAltitude } from "../lib/propagateBatch";
 import { createDayNight, type DayNight } from "../lib/dayNight";
 import { createCoverageLayer, type CoverageLayer } from "../lib/coverageLayer";
 import type { Observer } from "../lib/passes";
@@ -167,26 +170,8 @@ function altitudeToColor(altKm: number): string {
 }
 
 const ANALYTICS_PANEL_WIDTH_PX = 392;
-
-const CLUSTER_PALETTE = [
-  "#4fc3f7",
-  "#81c784",
-  "#ffd54f",
-  "#ff8a65",
-  "#f06292",
-  "#ba68c8",
-  "#90a4ae",
-  "#fff176",
-];
-
-function clusterLabelToColor(label: number, algorithm: ClusterAlgorithm | null): string {
-  if (algorithm === "dbscan" && label === -1) return "#78909c";
-  if (algorithm === "isolation_forest") {
-    if (label === -1) return "#ff6e6e";
-    return "#69f0ae";
-  }
-  return CLUSTER_PALETTE[Math.abs(label) % CLUSTER_PALETTE.length];
-}
+/** Size of the textured Earth inside the full-size wireframe one on the Orbital Intelligence page. */
+const ORBITAL_INTELLIGENCE_EARTH_SCALE = 0.22;
 
 function formatClusterParamsLine(payload: ClusterRunPayload): string {
   switch (payload.algorithm) {
@@ -205,12 +190,13 @@ type GlobeViewProps = {
   mode?: GlobeViewMode;
 };
 
-/** Propagate a satrec to geodetic lat/lng/alt at a given Date using satellite.js */
+/** Propagate a satrec to geodetic lat/lng/alt at a given Date using satellite.js (null if it fails or is implausible). */
 function propagateToGeodetic(satrec: satellite.SatRec, date: Date): { lat: number; lng: number; alt: number } | null {
   const posVel = satellite.propagate(satrec, date);
   if (!posVel || !posVel.position || typeof posVel.position === "boolean") return null;
   const gmst = satellite.gstime(date);
   const geo = satellite.eciToGeodetic(posVel.position, gmst);
+  if (!isPlausibleAltitude(geo.height, satrec)) return null;
   return {
     lat: satellite.degreesLat(geo.latitude),
     lng: satellite.degreesLong(geo.longitude),
@@ -422,6 +408,8 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
   const globeRef = useRef<GlobeInstance | null>(null);
   const clusterBySatIdRef = useRef<Map<number, number> | null>(null);
   const clusterAlgorithmRef = useRef<ClusterAlgorithm | null>(null);
+  /** The last clustering run's inputs and labels, for CSV export. */
+  const lastClusterRunRef = useRef<ClusterRun | null>(null);
   const propagateAllRef = useRef<(tles: SatTle[], forceUiUpdate?: boolean) => void>(() => {});
   /** The time the globe shows: live by default, or paused / sped up / moved by the time controls. */
   const [clock] = useState(createSimClock);
@@ -469,8 +457,9 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
 
   /** Counts for the panels, updated every few seconds without re-rendering the whole page. */
   const [statsStore] = useState(() => createStore<CatalogStats>(EMPTY_STATS));
-  const [satType, setSatType] = useState<string>("Popular");
-  const [satCompany, setSatCompany] = useState<string>("All");
+  // The ML page needs a large fleet to find structure in; Starlink is preloaded by the backend, so it's ready at once.
+  const [satType, setSatType] = useState<string>(mode === "orbital-intelligence" ? "Internet" : "Popular");
+  const [satCompany, setSatCompany] = useState<string>(mode === "orbital-intelligence" ? "Starlink" : "All");
   const [satCount, setSatCount] = useState(0);
   const [selectedSats, setSelectedSats] = useState<SelectedSat[]>([]);
   const [orbitPaths, setOrbitPaths] = useState<OrbitPath[]>([]);
@@ -889,6 +878,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     setFollow(null);
     clusterBySatIdRef.current = null;
     clusterAlgorithmRef.current = null;
+    lastClusterRunRef.current = null;
     setClusterSummary(null);
     setClusterError(null);
 
@@ -1385,9 +1375,11 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     setClusterError(null);
     try {
       const now = clock.now();
+      const geos: { lat: number; lng: number; alt: number }[] = [];
       const points = tles.map((t) => {
         const geo = propagateToGeodetic(t.satrec, now);
         if (!geo) return null;
+        geos.push(geo);
         const xyz = geodeticToCartesianKm(geo.lat, geo.lng, geo.alt);
         return {
           satelliteId: t.satelliteId,
@@ -1439,7 +1431,22 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
         sizes,
         noiseCount: resp.noiseCount ?? null,
         paramsLine: formatClusterParamsLine(payload),
+        computedAtMs: now.getTime(),
       });
+      lastClusterRunRef.current = {
+        algorithm: resolvedAlgo,
+        paramsLine: formatClusterParamsLine(payload),
+        computedAtMs: now.getTime(),
+        rows: points.map((p, i) => ({
+          satelliteId: p.satelliteId,
+          name: p.name,
+          label: resp.labels[i] ?? 0,
+          xKm: p.altitudeKm,
+          yKm: p.inclinationDeg,
+          zKm: p.meanMotionRpd,
+          ...geos[i],
+        })),
+      };
       propagateAllRef.current(tles, true);
     } catch (e) {
       console.error(e);
@@ -1452,10 +1459,18 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
   const clearClustering = useCallback(() => {
     clusterBySatIdRef.current = null;
     clusterAlgorithmRef.current = null;
+    lastClusterRunRef.current = null;
     setClusterSummary(null);
     setClusterError(null);
     propagateAllRef.current(satTlesRef.current, true);
   }, []);
+
+  const exportClusterCsv = useCallback(() => {
+    const run = lastClusterRunRef.current;
+    if (!run) return;
+    const filter = satCompany !== "All" ? `${satType}-${satCompany}` : satType;
+    downloadText(clusterRunToCsv(run), `lune-${run.algorithm}-${slug(filter)}-${fileTimestamp(run.computedAtMs)}.csv`, "text/csv");
+  }, [satType, satCompany]);
 
   const handleSearchSelect = useCallback((sat: any) => {
     const satrec = satellite.twoline2satrec(sat.line1, sat.line2);
@@ -1717,24 +1732,10 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
       });
     }
 
-    if (mode !== "orbital-intelligence") {
-      scene.traverse((obj) => {
-        const o = obj as GlobeTaggedObject3D;
-        if (o.__globeObjType === "globe") {
-          o.scale.setScalar(1);
-        }
-      });
-      return () => {};
-    }
+    if (mode !== "orbital-intelligence") return;
 
     scene.add(axes);
     scene.add(grid);
-    scene.traverse((obj) => {
-      const o = obj as GlobeTaggedObject3D;
-      if (o.__globeObjType === "globe") {
-        o.scale.setScalar(0.22);
-      }
-    });
 
     return () => {
       scene.remove(axes);
@@ -1745,13 +1746,34 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
       const gm = grid.material;
       if (Array.isArray(gm)) gm.forEach((m) => m.dispose());
       else gm.dispose();
+    };
+  }, [globeInitialized, mode]);
 
+  // Orbital Intelligence look: the textured Earth shrinks to 22% while the country borders, lat/lon grid and
+  // atmosphere stay full size, so a small Earth sits inside a glowing wireframe one. three-globe only adds its
+  // Earth to the scene once the texture has loaded (instantly when cached, e.g. arriving from the tracker; later
+  // on a fresh page load), so keep looking each frame until it's there.
+  useEffect(() => {
+    if (!globeInitialized || !globeRef.current || mode !== "orbital-intelligence") return;
+    const scene = globeRef.current.scene();
+    const setEarthScale = (scale: number) => {
+      let found = false;
       scene.traverse((obj) => {
-        const o = obj as GlobeTaggedObject3D;
-        if (o.__globeObjType === "globe") {
-          o.scale.setScalar(1);
+        if ((obj as GlobeTaggedObject3D).__globeObjType === "globe") {
+          obj.scale.setScalar(scale);
+          found = true;
         }
       });
+      return found;
+    };
+    let frame = 0;
+    const apply = () => {
+      if (!setEarthScale(ORBITAL_INTELLIGENCE_EARTH_SCALE)) frame = requestAnimationFrame(apply);
+    };
+    apply();
+    return () => {
+      cancelAnimationFrame(frame);
+      setEarthScale(1);
     };
   }, [globeInitialized, mode]);
 
@@ -1874,6 +1896,8 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
                     clusterSummary={clusterSummary}
                     onRunClustering={(payload) => void runClustering(payload)}
                     onClearClustering={clearClustering}
+                    onExportCsv={exportClusterCsv}
+                    getNow={getNow}
                   />
                 )}
               </WithStats>

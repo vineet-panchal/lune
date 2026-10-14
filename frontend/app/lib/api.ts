@@ -149,6 +149,18 @@ export type ClusterAnalyticsRequest = {
   isolationContamination?: number;
 };
 
+/** Whether Spring can reach the Python analytics service. False on any failure, including Spring being down. */
+export async function fetchAnalyticsHealth(): Promise<boolean> {
+  try {
+    const res = await fetch(`${API_BASE}/api/analytics/health`, { cache: "no-store" });
+    if (!res.ok) return false;
+    const body = await res.json();
+    return body?.status === "ok";
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchClusterAnalytics(
   body: ClusterAnalyticsRequest
 ): Promise<ClusterAnalyticsResponse> {
