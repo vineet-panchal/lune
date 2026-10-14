@@ -170,6 +170,8 @@ function altitudeToColor(altKm: number): string {
 }
 
 const ANALYTICS_PANEL_WIDTH_PX = 392;
+/** Size of the textured Earth inside the full-size wireframe one on the Orbital Intelligence page. */
+const ORBITAL_INTELLIGENCE_EARTH_SCALE = 0.22;
 
 function formatClusterParamsLine(payload: ClusterRunPayload): string {
   switch (payload.algorithm) {
@@ -1730,24 +1732,10 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
       });
     }
 
-    if (mode !== "orbital-intelligence") {
-      scene.traverse((obj) => {
-        const o = obj as GlobeTaggedObject3D;
-        if (o.__globeObjType === "globe") {
-          o.scale.setScalar(1);
-        }
-      });
-      return () => {};
-    }
+    if (mode !== "orbital-intelligence") return;
 
     scene.add(axes);
     scene.add(grid);
-    scene.traverse((obj) => {
-      const o = obj as GlobeTaggedObject3D;
-      if (o.__globeObjType === "globe") {
-        o.scale.setScalar(0.22);
-      }
-    });
 
     return () => {
       scene.remove(axes);
@@ -1758,13 +1746,34 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
       const gm = grid.material;
       if (Array.isArray(gm)) gm.forEach((m) => m.dispose());
       else gm.dispose();
+    };
+  }, [globeInitialized, mode]);
 
+  // Orbital Intelligence look: the textured Earth shrinks to 22% while the country borders, lat/lon grid and
+  // atmosphere stay full size, so a small Earth sits inside a glowing wireframe one. three-globe only adds its
+  // Earth to the scene once the texture has loaded (instantly when cached, e.g. arriving from the tracker; later
+  // on a fresh page load), so keep looking each frame until it's there.
+  useEffect(() => {
+    if (!globeInitialized || !globeRef.current || mode !== "orbital-intelligence") return;
+    const scene = globeRef.current.scene();
+    const setEarthScale = (scale: number) => {
+      let found = false;
       scene.traverse((obj) => {
-        const o = obj as GlobeTaggedObject3D;
-        if (o.__globeObjType === "globe") {
-          o.scale.setScalar(1);
+        if ((obj as GlobeTaggedObject3D).__globeObjType === "globe") {
+          obj.scale.setScalar(scale);
+          found = true;
         }
       });
+      return found;
+    };
+    let frame = 0;
+    const apply = () => {
+      if (!setEarthScale(ORBITAL_INTELLIGENCE_EARTH_SCALE)) frame = requestAnimationFrame(apply);
+    };
+    apply();
+    return () => {
+      cancelAnimationFrame(frame);
+      setEarthScale(1);
     };
   }, [globeInitialized, mode]);
 
