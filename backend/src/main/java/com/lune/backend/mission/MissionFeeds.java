@@ -118,7 +118,7 @@ public class MissionFeeds {
         return articles;
     }
 
-    static List<LaunchDto> parseLaunches(JsonNode root) {
+    public static List<LaunchDto> parseLaunches(JsonNode root) {
         List<LaunchDto> launches = new ArrayList<>();
         for (JsonNode l : array(root.path("results"))) {
             JsonNode mission = l.path("mission");
