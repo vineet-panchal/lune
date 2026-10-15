@@ -8,7 +8,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 export async function fetchSatellites(
   page = 1,
   pageSize = 20,
-  opts?: { search?: string; sort?: string; group?: string; type?: string }
+  opts?: { search?: string; sort?: string; group?: string; type?: string; ids?: string }
 ) {
   const params = new URLSearchParams({
     page: String(page),
@@ -18,6 +18,7 @@ export async function fetchSatellites(
   if (opts?.sort) params.set("sort", opts.sort);
   if (opts?.group) params.set("group", opts.group);
   if (opts?.type) params.set("type", opts.type);
+  if (opts?.ids) params.set("ids", opts.ids);
   const url = `${API_BASE}/api/satellites?${params.toString()}`;
   const maxAttempts = 4;
 

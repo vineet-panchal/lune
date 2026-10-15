@@ -500,6 +500,8 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
   // The ML page needs a large fleet to find structure in; Starlink is preloaded by the backend, so it's ready at once.
   const [satType, setSatType] = useState<string>(mode === "orbital-intelligence" ? "Internet" : "Popular");
   const [satCompany, setSatCompany] = useState<string>(mode === "orbital-intelligence" ? "Starlink" : "All");
+  /** An exact list of satellites from a link (e.g. one launch's, from Mission Control), shown instead of the filter. */
+  const [customList, setCustomList] = useState<{ ids: number[]; label: string } | null>(null);
   const [satCount, setSatCount] = useState(0);
   const [selectedSats, setSelectedSats] = useState<SelectedSat[]>([]);
   const [orbitPaths, setOrbitPaths] = useState<OrbitPath[]>([]);
@@ -950,9 +952,11 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     }
 
     setLoading(true);
-    const opts = satCompany !== "All"
-      ? (COMPANY_API_OPTS[satCompany] ?? { search: satCompany })
-      : (SAT_TYPE_OPTS[satType] ?? { search: satType });
+    const opts = customList
+      ? { ids: customList.ids.join(",") }
+      : satCompany !== "All"
+        ? (COMPANY_API_OPTS[satCompany] ?? { search: satCompany })
+        : (SAT_TYPE_OPTS[satType] ?? { search: satType });
     // The backend serves whole groups from memory, so one request returns everything.
     const PAGE_SIZE = 20000;
     // While the backend is still downloading a group for the first time, poll for what has arrived.
@@ -1142,7 +1146,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
       if (propagateTimer) window.clearTimeout(propagateTimer);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [satType, satCompany, activePanel]);
+  }, [satType, satCompany, activePanel, customList]);
 
   // Search autocomplete — debounced API call
   useEffect(() => {
@@ -1262,6 +1266,8 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     const t = Date.parse(params.get("t") ?? "");
     if (Number.isFinite(t)) clock.setTime(t);
     const sats = (params.get("sats") ?? "").split(",").map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    const ids = (params.get("ids") ?? "").split(",").map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    if (ids.length > 0) setCustomList({ ids, label: params.get("label") || `${ids.length} satellites` });
     const follow = Number(params.get("follow"));
     if (sats.length > 0) {
       pendingShareRef.current = {
@@ -1279,6 +1285,10 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     const params = new URLSearchParams();
     if (satType !== "Popular") params.set("type", satType);
     if (satCompany !== "All") params.set("company", satCompany);
+    if (customList) {
+      params.set("ids", customList.ids.join(","));
+      params.set("label", customList.label);
+    }
     if (selectedSats.length > 0) params.set("sats", selectedSats.map((s) => s.satelliteId).join(","));
     if (followId !== null) params.set("follow", String(followId));
     if (colorMode !== "altitude") params.set("color", colorMode);
@@ -1287,7 +1297,7 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     return `${window.location.origin}${window.location.pathname}${query ? `?${query}` : ""}`;
     // clockVersion: rebuild when the time controls change
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [satType, satCompany, selectedSats, followId, colorMode, clock, clockVersion]);
+  }, [satType, satCompany, customList, selectedSats, followId, colorMode, clock, clockVersion]);
 
   // Keep the address bar in sync (without adding history entries), so a refresh keeps the view.
   // Skipped while a shared link is still being restored, so it isn't overwritten with defaults.
@@ -1966,10 +1976,15 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
           companyOptions={COMPANY_OPTIONS}
           companyDescriptions={COMPANY_DESCRIPTIONS}
           onSatTypeChange={(value) => {
+            setCustomList(null);
             setSatType(value);
             setSatCompany("All");
           }}
-          onSatCompanyChange={setSatCompany}
+          onSatCompanyChange={(value) => {
+            setCustomList(null);
+            setSatCompany(value);
+          }}
+          customList={customList && { label: customList.label, onClear: () => setCustomList(null) }}
           statsStore={statsStore}
           satCount={satCount}
           dataSource={dataSource}

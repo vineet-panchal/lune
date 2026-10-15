@@ -27,13 +27,17 @@ public class SatelliteController {
     /** Enough for a cluster's worth of altitude lines; each satellite can have up to 60 samples. */
     private static final int MAX_HISTORY_IDS = 500;
 
+    /** A launch can carry a few hundred satellites; the ids list is in the query string. */
+    private static final int MAX_ID_LIST = 1000;
+
     private final SatelliteService satelliteService;
     private final OrbitChangeService orbitChangeService;
 
     /**
      * List satellites (paginated). Data from TLE catalog.
      * Optional: search (filter by name, e.g. ISS, NOAA, Starlink), sort (e.g. popularity, name),
-     * group=popular (curated list only, no external catalog call).
+     * group=popular (curated list only, no external catalog call), ids=25544,48274 (exactly these satellites,
+     * e.g. one launch's satellites from Mission Control).
      */
     @GetMapping(produces = MediaType.APPLICATION_JSON_VALUE)
         public ResponseEntity<SatelliteListResponseDto> list(
@@ -42,9 +46,11 @@ public class SatelliteController {
             @RequestParam(required = false) String search,
             @RequestParam(required = false) String sort,
             @RequestParam(required = false) String group,
-            @RequestParam(required = false) String type) {
-        SatelliteListResponseDto body = satelliteService.getSatellites(
-            page, Math.min(pageSize, MAX_PAGE_SIZE), search, sort, group, type);
+            @RequestParam(required = false) String type,
+            @RequestParam(required = false) String ids) {
+        SatelliteListResponseDto body = ids != null && !ids.isBlank()
+            ? satelliteService.getSatellitesByIds(page, Math.min(pageSize, MAX_PAGE_SIZE), parseIds(ids, MAX_ID_LIST))
+            : satelliteService.getSatellites(page, Math.min(pageSize, MAX_PAGE_SIZE), search, sort, group, type);
         return ResponseEntity.ok(body);
         }
 
@@ -94,16 +100,7 @@ public class SatelliteController {
             @RequestParam String ids,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) ZonedDateTime datetime) {
         Instant instant = datetime != null ? datetime.withZoneSameInstant(ZoneOffset.UTC).toInstant() : Instant.now();
-        List<Integer> parsedIds = java.util.Arrays.stream(ids.split(","))
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .limit(500)
-                .map(s -> {
-                    try { return Integer.parseInt(s); } catch (NumberFormatException e) { return null; }
-                })
-                .filter(java.util.Objects::nonNull)
-                .toList();
-        List<SatellitePositionDto> results = parsedIds.parallelStream()
+        List<SatellitePositionDto> results = parseIds(ids, 500).parallelStream()
                 .map(id -> satelliteService.getPosition(id, instant))
                 .filter(Optional::isPresent)
                 .map(Optional::get)
@@ -126,5 +123,18 @@ public class SatelliteController {
     public ResponseEntity<List<OrbitHistoryDto>> history(@RequestBody OrbitChangesRequestDto request) {
         List<Integer> ids = request.ids() == null ? List.of() : request.ids();
         return ResponseEntity.ok(orbitChangeService.history(ids.stream().limit(MAX_HISTORY_IDS).toList()));
+    }
+
+    /** Comma-separated NORAD IDs; anything that isn't a number is skipped. */
+    private static List<Integer> parseIds(String ids, int limit) {
+        return java.util.Arrays.stream(ids.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .limit(limit)
+                .map(s -> {
+                    try { return Integer.parseInt(s); } catch (NumberFormatException e) { return null; }
+                })
+                .filter(java.util.Objects::nonNull)
+                .toList();
     }
 }

@@ -31,6 +31,8 @@ public class SatelliteService {
     private static final double MIN_SPEED_KM_S = 2.0; // avoid div by zero for very slow objects
     private static final long TLE_CACHE_TTL_MS = 3600_000; // cache TLE data for 1 hour
     private static final int SEARCH_RESULT_LIMIT = 100;
+    /** An ID list this short may download satellites that aren't in memory, one request each. */
+    private static final int MAX_ID_LOOKUPS = 10;
 
     /** Catalog keys merged for the "Internet" type. */
     private static final List<String> INTERNET_KEYS = List.of(
@@ -153,6 +155,21 @@ public class SatelliteService {
             }
         }
         return searchTleApi(page, pageSize, term, sort, type);
+    }
+
+    /**
+     * Exactly these satellites, from memory (any loaded group can supply them). A short list may also look up the
+     * ones that aren't loaded; a long one (a whole launch) is only ever answered from memory.
+     */
+    public SatelliteListResponseDto getSatellitesByIds(int page, int pageSize, List<Integer> ids) {
+        boolean lookUpMissing = ids.size() <= MAX_ID_LOOKUPS;
+        List<SatelliteListItemDto> items = new ArrayList<>();
+        for (int id : new LinkedHashSet<>(ids)) {
+            Optional<CelestrakSatelliteDto> tle = lookUpMissing ? getCachedTle(id) : catalog.findById(id);
+            tle.ifPresent(t -> items.add(toItem(t, null)));
+        }
+        // Gathered from whichever groups hold them, so there's no single source to name.
+        return paginate(page, pageSize, items, null, null, false);
     }
 
     private SatelliteListResponseDto getPopular(int page, int pageSize) {
