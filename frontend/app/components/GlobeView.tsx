@@ -36,6 +36,7 @@ import type { Observer } from "../lib/passes";
 import TimeControls from "./panels/TimeControls";
 import PanelDock, { type DockPanel } from "./layout/PanelDock";
 import { useLayoutMode, type LayoutMode } from "../lib/useLayoutMode";
+import { useObserver } from "../lib/useObserver";
 import type { SimClock } from "../lib/simClock";
 import { MdInsights, MdLayers, MdPalette, MdSatelliteAlt, MdSchedule, MdTune } from "react-icons/md";
 import * as satellite from "satellite.js";
@@ -290,7 +291,6 @@ const TRAIL_MINUTES = 90;
 const TRAIL_STEP_SECONDS = 30;
 /** Redraw a trail once simulated time is this far from the moment it was drawn around. */
 const TRAIL_RECENTER_MS = 15 * 60_000;
-const OBSERVER_STORAGE_KEY = "lune.observer";
 /**
  * Keyframes are computed this many update intervals ahead, so the next update always arrives before
  * the dots reach their target and they never stall waiting for it.
@@ -462,8 +462,8 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     propagatorRef.current?.dispose();
     propagatorRef.current = null;
   }, []);
-  /** Observer for pass predictions; kept in this browser only. */
-  const [observer, setObserverState] = useState<Observer | null>(null);
+  /** Observer for pass predictions and sky views; kept in this browser only. */
+  const [observer, setObserver] = useObserver();
   // Responsive layout: which panels are collapsed (remembered per device size) and the phone sheet.
   const layout = useLayoutMode();
   const [collapsedByMode, setCollapsedByMode] = useState<Record<LayoutMode, string[]>>(DEFAULT_COLLAPSED);
@@ -1340,24 +1340,6 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     };
   }, [clock]);
 
-  // Observer location for pass predictions: remembered in this browser only (never put in share links).
-  useEffect(() => {
-    try {
-      const saved = JSON.parse(window.localStorage.getItem(OBSERVER_STORAGE_KEY) ?? "null");
-      if (saved && Number.isFinite(saved.latDeg) && Number.isFinite(saved.lngDeg)) setObserverState(saved);
-    } catch {
-      /* storage unavailable or corrupt: start without a location */
-    }
-  }, []);
-  const setObserver = useCallback((next: Observer | null) => {
-    setObserverState(next);
-    try {
-      if (next) window.localStorage.setItem(OBSERVER_STORAGE_KEY, JSON.stringify(next));
-      else window.localStorage.removeItem(OBSERVER_STORAGE_KEY);
-    } catch {
-      /* storage unavailable: keep it for this session only */
-    }
-  }, []);
   // Mark the observer on the globe.
   useEffect(() => {
     globeRef.current?.pointsData(observer ? [{ lat: observer.latDeg, lng: observer.lngDeg }] : []);

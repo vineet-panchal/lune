@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
 
-export type NavbarPage = "satellite-tracker" | "orbital-intelligence";
+export type NavbarPage = "satellite-tracker" | "orbital-intelligence" | "constellations";
 
 type NavbarProps = {
   current: NavbarPage;
@@ -15,7 +15,7 @@ const FONT = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
 const PAGES: { label: string; href?: string; page?: NavbarPage }[] = [
   { label: "Satellite Tracker", href: "/", page: "satellite-tracker" },
   { label: "Orbital Intelligence", href: "/orbital-intelligence", page: "orbital-intelligence" },
-  { label: "Constellations" },
+  { label: "Constellations", href: "/constellations", page: "constellations" },
   { label: "News" },
   { label: "Trips" },
 ];

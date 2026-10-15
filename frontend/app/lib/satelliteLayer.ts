@@ -465,7 +465,7 @@ export function createSatelliteLayer(
 }
 
 /** Soft round glow: white in the centre fading to transparent, tinted by the sprite colour. */
-function createGlowTexture(): THREE.Texture {
+export function createGlowTexture(): THREE.Texture {
   const size = 128;
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = size;

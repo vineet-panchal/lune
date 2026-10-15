@@ -59,7 +59,9 @@ public class SatelliteCatalog {
             "STATIONS", "STARLINK", "ONEWEB", "GPS-OPS", "GLO-OPS",
             "GALILEO", "BEIDOU", "INTELSAT", "SES", "IRIDIUM",
             "IRIDIUM-NEXT", "ORBCOMM", "GLOBALSTAR", "AMATEUR",
-            "NOAA", "GOES", "RESOURCE", "SARSAT", "GEO", "ACTIVE"
+            "NOAA", "GOES", "RESOURCE", "SARSAT", "GEO", "ACTIVE",
+            // The ~150 brightest satellites (naked-eye objects), for the Constellations page's sky view.
+            "VISUAL"
     );
 
     /** TLE API search terms used when CelesTrak can't serve a group. */
