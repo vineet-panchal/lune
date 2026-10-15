@@ -1,6 +1,8 @@
-import { useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import type * as satellite from "satellite.js";
 import { compassPoint, predictPasses, type Observer, type PassVisibility } from "../../lib/passes";
+import { constellationsAlongPass } from "../../lib/sky/passConstellations";
+import { loadSkyData, type SkyData } from "../../lib/sky/skyData";
 
 type PassPredictionsProps = {
   satrec: satellite.SatRec;
@@ -55,6 +57,25 @@ function PassList({ satrec, fromMs, observer, onShowPass }: { satrec: satellite.
     () => predictPasses(satrec, observer, bucket, { days: 3, maxPasses: 5 }),
     [satrec, observer, bucket]
   );
+  // Which constellations each pass crosses, once the star data has loaded (it's shared with the Constellations page).
+  const [sky, setSky] = useState<SkyData | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    loadSkyData()
+      .then((data) => !cancelled && setSky(data))
+      .catch(() => {
+        /* no star data: passes are listed without constellations */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const paths = useMemo(() => {
+    if (!sky || prediction.kind !== "passes") return new Map<number, string[]>();
+    return new Map(
+      prediction.passes.map((p) => [p.rise.getTime(), constellationsAlongPass(sky, satrec, observer, p.rise.getTime(), p.set.getTime())])
+    );
+  }, [sky, prediction, satrec, observer]);
 
   if (prediction.kind === "stationary") {
     return (
@@ -75,8 +96,10 @@ function PassList({ satrec, fromMs, observer, onShowPass }: { satrec: satellite.
         const vis = VISIBILITY_STYLE[p.visibility];
         const inProgress = p.rise.getTime() <= fromMs;
         const minutes = Math.max(1, Math.round((p.set.getTime() - p.rise.getTime()) / 60_000));
+        const path = paths.get(p.rise.getTime()) ?? [];
         return (
-          <div key={p.rise.getTime()} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div key={p.rise.getTime()}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ flex: 1, minWidth: 0, color: "rgba(255,255,255,0.9)" }}>
               {inProgress ? "Now" : formatPassTime(p.rise)} · ↑{p.maxElevationDeg.toFixed(0)}° ·{" "}
               {compassPoint(p.riseAzimuthDeg)}→{compassPoint(p.setAzimuthDeg)} · {minutes} min
@@ -89,6 +112,13 @@ function PassList({ satrec, fromMs, observer, onShowPass }: { satrec: satellite.
             >
               show
             </span>
+          </div>
+          {path.length > 0 && (
+            <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 10, paddingLeft: 8 }} title="Constellations it crosses above 10°, as you'd see it against the stars">
+              through {path.slice(0, 5).join(" → ")}
+              {path.length > 5 ? " …" : ""}
+            </div>
+          )}
           </div>
         );
       })}
