@@ -51,8 +51,24 @@ public class AnalyticsController {
     /** Settings helpers for the models; see the analytics service's /sweep. */
     @PostMapping(value = "/sweep", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<?> sweep(@RequestBody String body) {
+        return passThrough(() -> analyticsService.sweep(body));
+    }
+
+    /** The model's view in 2D; see the analytics service's /project. */
+    @PostMapping(value = "/project", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> project(@RequestBody String body) {
+        return passThrough(() -> analyticsService.project(body));
+    }
+
+    /** Close-approach screening; see the analytics service's /conjunctions. */
+    @PostMapping(value = "/conjunctions", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> conjunctions(@RequestBody String body) {
+        return passThrough(() -> analyticsService.conjunctions(body));
+    }
+
+    private ResponseEntity<?> passThrough(java.util.function.Supplier<String> call) {
         try {
-            return ResponseEntity.ok(analyticsService.sweep(body));
+            return ResponseEntity.ok(call.get());
         }
         catch (IllegalStateException e) {
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)

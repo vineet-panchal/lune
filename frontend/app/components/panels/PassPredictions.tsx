@@ -96,7 +96,8 @@ function PassList({ satrec, fromMs, observer, onShowPass }: { satrec: satellite.
   );
 }
 
-function LocationForm({ current, onSave, onCancel }: { current: Observer | null; onSave: (o: Observer) => void; onCancel?: () => void }) {
+/** Pick the observer: browser geolocation or typed coordinates (shared with the Orbital Intelligence "My sky" tab). */
+export function LocationForm({ current, onSave, onCancel }: { current: Observer | null; onSave: (o: Observer) => void; onCancel?: () => void }) {
   const [lat, setLat] = useState(current ? String(current.latDeg) : "");
   const [lng, setLng] = useState(current ? String(current.lngDeg) : "");
   const [status, setStatus] = useState<string | null>(null);

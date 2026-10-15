@@ -2,7 +2,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ORBIT_AXES, type OrbitAxis, type OrbitPoint } from "../../../lib/clusterFeatures";
 import { clusterLabelToColor, type ClusterAlgorithm } from "../../../lib/clusterLabels";
 import { useStore, type ReadableStore } from "../../../lib/store";
-import { MUTED, TEXT, selectStyle } from "./ui";
+import { MUTED, TEXT, buttonStyle, chipStyle, errorStyle, selectStyle } from "./ui";
+
+/** The model's view of the satellites: PCA of the features it compares them by (see the analytics service). */
+export type ModelProjection = {
+  coords: Map<number, [number, number]>;
+  /** Share of the variation each axis explains (0..1). */
+  explained: number[];
+  /** What drives each axis most, e.g. "inclination, altitude". */
+  drivers: string[];
+  /** The feature selection it was computed for, e.g. "altitude, inclination, orbital plane". */
+  featuresLine: string;
+};
 
 type OrbitScatterProps = {
   points: OrbitPoint[];
@@ -15,7 +26,15 @@ type OrbitScatterProps = {
   globeHover: ReadableStore<number | null>;
   onHover: (satelliteId: number | null) => void;
   onPick: (satelliteId: number) => void;
+  /** Model view: the latest projection, whether it matches the current feature choice, and how to (re)compute it. */
+  projection: ModelProjection | null;
+  projectionCurrent: boolean;
+  projectionBusy: boolean;
+  projectionError: string | null;
+  onRequestProjection: () => void;
 };
+
+type Mode = "orbit" | "model";
 
 const HEIGHT = 230;
 const PAD = { left: 40, right: 10, top: 8, bottom: 26 };
@@ -27,7 +46,21 @@ const NEUTRAL = "#4fc3f7";
  * coloured by the last run. Hovering a dot lights the satellite up on the globe, and the satellite hovered on the
  * globe is ringed here; clicking a dot selects and follows it.
  */
-export default function OrbitScatter({ points, labelById, algorithm, focusIds, globeHover, onHover, onPick }: OrbitScatterProps) {
+export default function OrbitScatter({
+  points: allPoints,
+  labelById,
+  algorithm,
+  focusIds,
+  globeHover,
+  onHover,
+  onPick,
+  projection,
+  projectionCurrent,
+  projectionBusy,
+  projectionError,
+  onRequestProjection,
+}: OrbitScatterProps) {
+  const [mode, setMode] = useState<Mode>("orbit");
   const [xAxis, setXAxis] = useState<OrbitAxis>("inclinationDeg");
   const [yAxis, setYAxis] = useState<OrbitAxis>("altitudeKm");
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -45,21 +78,40 @@ export default function OrbitScatter({ points, labelById, algorithm, focusIds, g
     return () => ro.disconnect();
   }, []);
 
+  // Model view plots only satellites the projection covers (the ones loaded when it was computed).
+  const modelView = mode === "model" && projection !== null;
+  const points = useMemo(
+    () => (modelView ? allPoints.filter((p) => projection.coords.has(p.satelliteId)) : allPoints),
+    [modelView, allPoints, projection]
+  );
+  const axes = useMemo<{ x: AxisSpec; y: AxisSpec }>(() => {
+    if (modelView) {
+      return {
+        x: { value: (p) => projection.coords.get(p.satelliteId)?.[0] ?? 0, title: pcTitle(1, projection), format: (v) => v.toFixed(2) },
+        y: { value: (p) => projection.coords.get(p.satelliteId)?.[1] ?? 0, title: pcTitle(2, projection), format: (v) => v.toFixed(2) },
+      };
+    }
+    return {
+      x: { value: (p) => p[xAxis], title: axisTitle(xAxis), format: (v) => formatValue(xAxis, v) },
+      y: { value: (p) => p[yAxis], title: axisTitle(yAxis), format: (v) => formatValue(yAxis, v) },
+    };
+  }, [modelView, projection, xAxis, yAxis]);
+
   // Screen position of every point; axes span the 0.5–99.5 percentile so a few stray orbits don't squash the rest.
   const layout = useMemo(() => {
     if (width === 0 || points.length === 0) return null;
-    const xr = robustRange(points.map((p) => p[xAxis]));
-    const yr = robustRange(points.map((p) => p[yAxis]));
+    const xr = robustRange(points.map(axes.x.value));
+    const yr = robustRange(points.map(axes.y.value));
     const plotW = width - PAD.left - PAD.right;
     const plotH = HEIGHT - PAD.top - PAD.bottom;
     const sx = new Float32Array(points.length);
     const sy = new Float32Array(points.length);
     points.forEach((p, i) => {
-      sx[i] = PAD.left + clamp01((p[xAxis] - xr.min) / (xr.max - xr.min || 1)) * plotW;
-      sy[i] = PAD.top + plotH - clamp01((p[yAxis] - yr.min) / (yr.max - yr.min || 1)) * plotH;
+      sx[i] = PAD.left + clamp01((axes.x.value(p) - xr.min) / (xr.max - xr.min || 1)) * plotW;
+      sy[i] = PAD.top + plotH - clamp01((axes.y.value(p) - yr.min) / (yr.max - yr.min || 1)) * plotH;
     });
     return { xr, yr, sx, sy, plotW, plotH };
-  }, [points, xAxis, yAxis, width]);
+  }, [points, axes, width]);
 
   const indexById = useMemo(() => new Map(points.map((p, i) => [p.satelliteId, i])), [points]);
 
@@ -69,7 +121,7 @@ export default function OrbitScatter({ points, labelById, algorithm, focusIds, g
     if (!canvas || !layout) return;
     const ctx = sizeCanvas(canvas, width);
     ctx.clearRect(0, 0, width, HEIGHT);
-    drawAxes(ctx, layout, xAxis, yAxis);
+    drawAxes(ctx, layout, axes);
     const drawDots = (faint: boolean) => {
       ctx.globalAlpha = faint ? 0.12 : 0.75;
       points.forEach((p, i) => {
@@ -83,7 +135,7 @@ export default function OrbitScatter({ points, labelById, algorithm, focusIds, g
     drawDots(true); // faint ones first, so the focused group draws on top
     drawDots(false);
     ctx.globalAlpha = 1;
-  }, [layout, points, labelById, algorithm, focusIds, xAxis, yAxis, width]);
+  }, [layout, points, labelById, algorithm, focusIds, axes, width]);
 
   // Overlay: rings for the satellite hovered here and the one hovered on the globe.
   useEffect(() => {
@@ -142,10 +194,47 @@ export default function OrbitScatter({ points, labelById, algorithm, focusIds, g
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 10, color: MUTED, marginBottom: 6 }}>
-        {axisSelect(xAxis, setXAxis, "x")}
-        {axisSelect(yAxis, setYAxis, "y")}
+      <div role="tablist" aria-label="Scatter axes" style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+        <button type="button" role="tab" aria-selected={mode === "orbit"} onClick={() => setMode("orbit")} style={chipStyle(mode === "orbit")}>
+          Orbit values
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={mode === "model"}
+          onClick={() => {
+            setMode("model");
+            if (!projection || !projectionCurrent) onRequestProjection();
+          }}
+          style={chipStyle(mode === "model")}
+        >
+          Model view (PCA)
+        </button>
       </div>
+      {mode === "orbit" ? (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 10, color: MUTED, marginBottom: 6 }}>
+          {axisSelect(xAxis, setXAxis, "x")}
+          {axisSelect(yAxis, setYAxis, "y")}
+        </div>
+      ) : (
+        <div style={{ fontSize: 10, color: MUTED, lineHeight: 1.45, marginBottom: 6 }}>
+          {projectionBusy
+            ? "Computing the model's view…"
+            : projection
+              ? `What the models see when comparing by ${projection.featuresLine}, flattened to the two directions that vary most.`
+              : "Shows the satellites the way the models compare them, flattened to two dimensions."}
+          {projection && !projectionCurrent && !projectionBusy && (
+            <>
+              {" "}
+              The feature choice has changed since.{" "}
+              <button type="button" onClick={onRequestProjection} style={{ ...buttonStyle(), fontSize: 10, padding: "1px 6px" }}>
+                Recompute
+              </button>
+            </>
+          )}
+          {projectionError && <div style={{ ...errorStyle, marginTop: 6 }}>{projectionError}</div>}
+        </div>
+      )}
       <div ref={wrapRef} style={{ position: "relative", height: HEIGHT }}>
         <canvas ref={baseRef} style={{ position: "absolute", inset: 0 }} />
         <canvas
@@ -167,7 +256,8 @@ export default function OrbitScatter({ points, labelById, algorithm, focusIds, g
       <div style={{ minHeight: 28, fontSize: 10, color: MUTED, lineHeight: 1.4, marginTop: 4 }}>
         {hovered ? (
           <>
-            <span style={{ color: TEXT }}>{hovered.name}</span> · {formatValue(xAxis, hovered[xAxis])} · {formatValue(yAxis, hovered[yAxis])}
+            <span style={{ color: TEXT }}>{hovered.name}</span> · {formatValue("altitudeKm", hovered.altitudeKm)} ·{" "}
+            {formatValue("inclinationDeg", hovered.inclinationDeg)} · plane {Math.round(hovered.raanDeg)}°
             <br />
             Click to select it and follow it on the globe.
           </>
@@ -179,11 +269,19 @@ export default function OrbitScatter({ points, labelById, algorithm, focusIds, g
   );
 }
 
+type AxisSpec = { value: (p: OrbitPoint) => number; title: string; format: (v: number) => string };
+
+/** "PC1 · 46% · mostly inclination, altitude" */
+function pcTitle(component: 1 | 2, projection: ModelProjection): string {
+  const share = projection.explained[component - 1];
+  const driver = projection.drivers[component - 1];
+  return `PC${component}${share !== undefined ? ` (${Math.round(share * 100)}%)` : ""}${driver ? `: ${driver}` : ""}`;
+}
+
 function drawAxes(
   ctx: CanvasRenderingContext2D,
   layout: { xr: { min: number; max: number }; yr: { min: number; max: number }; plotW: number; plotH: number },
-  xAxis: OrbitAxis,
-  yAxis: OrbitAxis
+  axes: { x: AxisSpec; y: AxisSpec }
 ) {
   const x0 = PAD.left;
   const y0 = PAD.top + layout.plotH;
@@ -197,19 +295,19 @@ function drawAxes(
   ctx.fillStyle = MUTED;
   ctx.font = "9px ui-monospace, Menlo, monospace";
   ctx.textAlign = "left";
-  ctx.fillText(formatValue(xAxis, layout.xr.min), x0, y0 + 11);
+  ctx.fillText(axes.x.format(layout.xr.min), x0, y0 + 11);
   ctx.textAlign = "right";
-  ctx.fillText(formatValue(xAxis, layout.xr.max), x0 + layout.plotW, y0 + 11);
+  ctx.fillText(axes.x.format(layout.xr.max), x0 + layout.plotW, y0 + 11);
   ctx.textAlign = "center";
-  ctx.fillText(axisTitle(xAxis), x0 + layout.plotW / 2, y0 + 22);
+  ctx.fillText(axes.x.title, x0 + layout.plotW / 2, y0 + 22);
   ctx.textAlign = "right";
-  ctx.fillText(formatValue(yAxis, layout.yr.max), x0 - 3, PAD.top + 8);
-  ctx.fillText(formatValue(yAxis, layout.yr.min), x0 - 3, y0);
+  ctx.fillText(axes.y.format(layout.yr.max), x0 - 3, PAD.top + 8);
+  ctx.fillText(axes.y.format(layout.yr.min), x0 - 3, y0);
   ctx.save();
   ctx.translate(10, PAD.top + layout.plotH / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.textAlign = "center";
-  ctx.fillText(axisTitle(yAxis), 0, 0);
+  ctx.fillText(axes.y.title, 0, 0);
   ctx.restore();
 }
 

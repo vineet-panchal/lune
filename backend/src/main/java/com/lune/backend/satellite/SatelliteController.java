@@ -24,6 +24,9 @@ public class SatelliteController {
 
     private static final double DEFAULT_TRAIL_KM = 30.0;
 
+    /** Enough for a cluster's worth of altitude lines; each satellite can have up to 60 samples. */
+    private static final int MAX_HISTORY_IDS = 500;
+
     private final SatelliteService satelliteService;
     private final OrbitChangeService orbitChangeService;
 
@@ -116,5 +119,12 @@ public class SatelliteController {
     public ResponseEntity<OrbitChangesResponseDto> orbitChanges(@RequestBody OrbitChangesRequestDto request) {
         List<Integer> ids = request.ids() == null ? List.of() : request.ids();
         return ResponseEntity.ok(orbitChangeService.find(ids.stream().limit(MAX_PAGE_SIZE).toList()));
+    }
+
+    /** Orbit history (one sample per stored TLE) for up to MAX_HISTORY_IDS satellites. */
+    @PostMapping(value = "/history", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<List<OrbitHistoryDto>> history(@RequestBody OrbitChangesRequestDto request) {
+        List<Integer> ids = request.ids() == null ? List.of() : request.ids();
+        return ResponseEntity.ok(orbitChangeService.history(ids.stream().limit(MAX_HISTORY_IDS).toList()));
     }
 }

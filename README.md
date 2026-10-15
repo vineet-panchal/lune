@@ -149,6 +149,15 @@ POST /api/analytics/cluster
 
 # Is the Python analytics service reachable?
 GET /api/analytics/health
+
+# Settings help (k sweep or DBSCAN k-distance), the model's 2D view (PCA), close approaches
+POST /api/analytics/sweep
+POST /api/analytics/project        { "points": [...] }
+POST /api/analytics/conjunctions   { "satellites": [{ "satelliteId", "name", "line1", "line2" }], "startMs", "hours", "thresholdKm" }
+
+# From the TLE history the backend records on every catalog refresh
+POST /api/satellites/orbit-changes { "ids": [...] }
+POST /api/satellites/history       { "ids": [...] }
 ```
 
 ### Launches

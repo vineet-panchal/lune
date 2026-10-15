@@ -5,7 +5,10 @@ from __future__ import annotations
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
+from scipy.spatial import cKDTree
+from sgp4.api import Satrec, SatrecArray
 from sklearn.cluster import DBSCAN, HDBSCAN, KMeans
+from sklearn.decomposition import PCA
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import silhouette_score
 from sklearn.mixture import GaussianMixture
@@ -274,3 +277,160 @@ def _knee(curve: np.ndarray) -> float:
     t = np.linspace(0, 1, len(curve))
     y = (curve - curve[0]) / (curve[-1] - curve[0])
     return float(curve[int(np.argmax(t - y))])
+
+
+class ProjectRequest(BaseModel):
+    points: list[ClusterPoint]
+
+
+@app.post("/project")
+def project(req: ProjectRequest) -> dict:
+    """
+    The model's view in two dimensions: standardise the features exactly as clustering does, then PCA.
+    coords[i] is [pc1, pc2] for points[i]; loadings[c][f] is how much feature f makes up component c.
+    """
+    if len(req.points) < 3:
+        raise HTTPException(status_code=400, detail="Need at least three points")
+    x_scaled = _scaled(req.points)
+    components = min(2, x_scaled.shape[1])
+    pca = PCA(n_components=components, random_state=42)
+    coords = pca.fit_transform(x_scaled)
+    if components == 1:
+        coords = np.column_stack([coords[:, 0], np.zeros(len(coords))])
+    return {
+        "coords": np.round(coords, 3).tolist(),
+        "explainedVariance": [round(float(v), 4) for v in pca.explained_variance_ratio_],
+        "loadings": np.round(pca.components_, 3).tolist(),
+    }
+
+
+class ConjunctionTle(BaseModel):
+    satellite_id: int = Field(alias="satelliteId")
+    name: str
+    line1: str
+    line2: str
+
+    model_config = {"populate_by_name": True}
+
+
+class ConjunctionRequest(BaseModel):
+    """Close approaches between these satellites from startMs (UTC millis) over the next `hours`."""
+
+    satellites: list[ConjunctionTle]
+    start_ms: float = Field(alias="startMs")
+    hours: float = 3.0
+    threshold_km: float = Field(default=5.0, alias="thresholdKm")
+    max_results: int = Field(default=50, alias="maxResults")
+
+    model_config = {"populate_by_name": True}
+
+
+# Positions every STEP_S seconds; a pair is a candidate if it's within threshold + the distance two satellites can
+# close in half a step (relative speeds in low orbit reach ~15.5 km/s), then its closest moment is solved between steps.
+STEP_S = 20.0
+MAX_RELATIVE_SPEED_KM_S = 15.5
+# Satellites flying in formation (a fresh launch's train, docked vehicles) stay close for hours: not an approach.
+FORMATION_SPEED_KM_S = 0.5
+CHUNK_STEPS = 30
+# Candidates are kept a little beyond the threshold so the list isn't empty when nothing comes that close.
+REPORT_MIN_KM = 25.0
+
+
+@app.post("/conjunctions")
+def conjunctions(req: ConjunctionRequest) -> dict:
+    if not (0.25 <= req.hours <= 24):
+        raise HTTPException(status_code=400, detail="hours must be between 0.25 and 24")
+    if not (0.1 <= req.threshold_km <= 100):
+        raise HTTPException(status_code=400, detail="thresholdKm must be between 0.1 and 100")
+    sats = []
+    for s in req.satellites:
+        try:
+            sats.append((s, Satrec.twoline2rv(s.line1, s.line2)))
+        except Exception:  # malformed TLE: leave it out
+            continue
+    if len(sats) < 2:
+        raise HTTPException(status_code=400, detail="Need at least two valid TLEs")
+
+    array = SatrecArray([rec for _, rec in sats])
+    n_steps = int(req.hours * 3600 / STEP_S) + 1
+    screen_km = req.threshold_km + MAX_RELATIVE_SPEED_KM_S * STEP_S / 2
+    keep_km = max(req.threshold_km * 4, REPORT_MIN_KM)
+
+    # Best (closest) approach per pair across all steps.
+    best: dict[tuple[int, int], tuple[float, float, float]] = {}
+    formation_pairs: set[tuple[int, int]] = set()
+    for chunk_start in range(0, n_steps, CHUNK_STEPS):
+        steps = np.arange(chunk_start, min(n_steps, chunk_start + CHUNK_STEPS))
+        jd, fr = _julian(req.start_ms + steps * STEP_S * 1000)
+        err, r, v = array.sgp4(jd, fr)  # (sats, steps, 3) km and km/s, TEME
+        for k, step in enumerate(steps):
+            ok = (err[:, k] == 0) & np.isfinite(r[:, k]).all(axis=1)
+            idx = np.flatnonzero(ok)
+            if len(idx) < 2:
+                continue
+            pos = r[idx, k]
+            pairs = cKDTree(pos).query_pairs(screen_km, output_type="ndarray")
+            if len(pairs) == 0:
+                continue
+            i, j = idx[pairs[:, 0]], idx[pairs[:, 1]]
+            dr = r[j, k] - r[i, k]
+            dv = v[j, k] - v[i, k]
+            speed2 = np.einsum("ij,ij->i", dv, dv)
+            # Closest moment assuming straight-line relative motion, within half a step either side.
+            t = np.clip(-np.einsum("ij,ij->i", dr, dv) / np.maximum(speed2, 1e-12), -STEP_S / 2, STEP_S / 2)
+            dmin = np.linalg.norm(dr + dv * t[:, None], axis=1)
+            speed = np.sqrt(speed2)
+            slow = speed < FORMATION_SPEED_KM_S
+            formation_pairs.update(zip(i[slow].tolist(), j[slow].tolist()))
+            close = ~slow & (dmin <= keep_km)
+            for a, b, d, tt, sp in zip(i[close].tolist(), j[close].tolist(), dmin[close], t[close], speed[close]):
+                prev = best.get((a, b))
+                if prev is None or d < prev[0]:
+                    best[(a, b)] = (float(d), float(step * STEP_S + tt), float(sp))
+
+    # Before the refinement below; straight-line estimates are within ~0.5 km of the refined distances.
+    total_within = sum(1 for d, _, _ in best.values() if d <= req.threshold_km)
+    ranked = sorted(best.items(), key=lambda kv: kv[1][0])[: max(1, min(req.max_results, 200))]
+    results = []
+    for (a, b), (d, t_s, speed) in ranked:
+        d, t_s = _refine(sats[a][1], sats[b][1], req.start_ms, t_s, d)
+        results.append(
+            {
+                "a": {"satelliteId": sats[a][0].satellite_id, "name": sats[a][0].name},
+                "b": {"satelliteId": sats[b][0].satellite_id, "name": sats[b][0].name},
+                "missKm": round(d, 3),
+                "tcaMs": round(req.start_ms + t_s * 1000),
+                "relativeSpeedKmS": round(speed, 3),
+                "withinThreshold": d <= req.threshold_km,
+            }
+        )
+    results.sort(key=lambda c: c["missKm"])
+    return {
+        "screened": len(sats),
+        "hours": req.hours,
+        "thresholdKm": req.threshold_km,
+        "formationPairsSkipped": len(formation_pairs),
+        "totalWithinThreshold": total_within,
+        "approaches": results,
+    }
+
+
+def _julian(ms: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Unix millis → (whole Julian day, fraction), as sgp4 wants for precision."""
+    jd = ms / 86_400_000.0 + 2440587.5
+    whole = np.floor(jd)
+    return whole, jd - whole
+
+
+def _refine(a: Satrec, b: Satrec, start_ms: float, t_s: float, d: float) -> tuple[float, float]:
+    """Re-propagate both satellites around the estimate (±STEP_S at 0.25 s) for the true closest moment."""
+    offsets = np.arange(-STEP_S, STEP_S + 0.25, 0.25)
+    jd, fr = _julian(start_ms + (t_s + offsets) * 1000)
+    ea, ra, _ = a.sgp4_array(jd, fr)
+    eb, rb, _ = b.sgp4_array(jd, fr)
+    ok = (ea == 0) & (eb == 0)
+    if not ok.any():
+        return d, t_s
+    dist = np.where(ok, np.linalg.norm(ra - rb, axis=1), np.inf)
+    i = int(np.argmin(dist))
+    return float(dist[i]), float(t_s + offsets[i])

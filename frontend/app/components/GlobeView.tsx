@@ -2,9 +2,12 @@
 
 import { useEffect, useRef, useState, useCallback, type ReactNode } from "react";
 import {
+  fetchCloseApproaches,
   fetchClusterAnalytics,
+  fetchProjection,
   fetchSatellites,
   fetchSweep,
+  type CloseApproach,
   type ClusterAnalyticsRequest,
   type ClusteringFeaturePoint,
 } from "../lib/api";
@@ -13,6 +16,7 @@ import { createStore, useStore, type Store } from "../lib/store";
 import { clusterLabelToColor } from "../lib/clusterLabels";
 import { clusterRunToCsv, downloadText, fileTimestamp, slug } from "../lib/clusterExport";
 import {
+  argumentOfLatitudeDeg,
   featureNames,
   featureVector,
   orbitQuantities,
@@ -26,6 +30,8 @@ import { createPropagator, type Positions, type Propagator } from "../lib/propag
 import { isPlausibleAltitude } from "../lib/propagateBatch";
 import { createDayNight, type DayNight } from "../lib/dayNight";
 import { createCoverageLayer, type CoverageLayer } from "../lib/coverageLayer";
+import { coverageGrid, skyView } from "../lib/coverage";
+import { createCoverageHeatmap, type CoverageHeatmap } from "../lib/coverageHeatmap";
 import type { Observer } from "../lib/passes";
 import TimeControls from "./panels/TimeControls";
 import PanelDock, { type DockPanel } from "./layout/PanelDock";
@@ -525,6 +531,10 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
   const satelliteLayerRef = useRef<SatelliteLayer | null>(null);
   const dayNightRef = useRef<DayNight | null>(null);
   const coverageRef = useRef<CoverageLayer | null>(null);
+  const coverageHeatmapRef = useRef<CoverageHeatmap | null>(null);
+  /** Coverage map on the globe (Orbital Intelligence "My sky"): minimum elevation counted, or null when off. */
+  const [coverageMinElevation, setCoverageMinElevation] = useState<number | null>(null);
+  const [coverageMax, setCoverageMax] = useState(0);
   /** Day/night shading on the globe, plus dimming satellites that are in Earth's shadow. */
   const [dayNightEnabled, setDayNightEnabled] = useState(false); // off by default; toggle in Visualize
   const dayNightEnabledRef = useRef(false);
@@ -793,6 +803,8 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
       dayNightRef.current = dayNight;
       const coverage = createCoverageLayer(globe.scene());
       coverageRef.current = coverage;
+      const coverageHeatmap = createCoverageHeatmap(globe.scene());
+      coverageHeatmapRef.current = coverageHeatmap;
 
       // Load country borders
       fetch("https://unpkg.com/world-atlas@2/countries-110m.json")
@@ -865,10 +877,12 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
         satelliteLayer.dispose();
         dayNight.dispose();
         coverage.dispose();
+        coverageHeatmap.dispose();
         // Dev StrictMode mounts twice; don't clear a newer mount's layer.
         if (satelliteLayerRef.current === satelliteLayer) satelliteLayerRef.current = null;
         if (dayNightRef.current === dayNight) dayNightRef.current = null;
         if (coverageRef.current === coverage) coverageRef.current = null;
+        if (coverageHeatmapRef.current === coverageHeatmap) coverageHeatmapRef.current = null;
         resizeObserver.disconnect();
         interactionTarget.removeEventListener("pointerdown", markInteraction);
         interactionTarget.removeEventListener("pointermove", markInteraction);
@@ -1204,7 +1218,12 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     const shown = satTlesRef.current.filter((t) => propagateToGeodetic(t.satrec, now));
     if (mode === "orbital-intelligence") {
       const nowMs = now.getTime();
-      setOrbitPoints(shown.map((t) => ({ satelliteId: t.satelliteId, name: t.name, ...orbitQuantities(t.satrec, nowMs) })));
+      setOrbitPoints(shown.map((t) => ({
+        satelliteId: t.satelliteId,
+        name: t.name,
+        ...orbitQuantities(t.satrec, nowMs),
+        argLatDeg: argumentOfLatitudeDeg(t.satrec, nowMs),
+      })));
     }
     const coloring = computeStaticColoring(colorMode, shown, now);
     staticColorsRef.current = coloring?.colorById ?? null;
@@ -1563,6 +1582,62 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
     if (picked.length === 1) params.set("follow", String(picked[0]));
     return `/?${params.toString().replace(/%2C/g, ",")}`;
   }, [satType, satCompany]);
+
+  /** The model's view (PCA) of the loaded satellites with these features, keyed by satellite. */
+  const projectFeatures = useCallback(async (features: FeatureSelection) => {
+    const { points } = buildClusterPoints(features);
+    if (points.length < 3) throw new Error("Not enough satellites loaded for a model view.");
+    const res = await fetchProjection(points);
+    return { ...res, ids: points.map((p) => p.satelliteId) };
+  }, [buildClusterPoints]);
+
+  /** Close approaches among the drawn satellites, from the globe's current time. */
+  const findApproaches = useCallback((hours: number, thresholdKm: number) => {
+    const now = clock.now();
+    const satellites = satTlesRef.current
+      .filter((t) => t.line1 && t.line2 && propagateToGeodetic(t.satrec, now))
+      .map((t) => ({ satelliteId: t.satelliteId, name: t.name, line1: t.line1 ?? "", line2: t.line2 ?? "" }));
+    return fetchCloseApproaches({ satellites, startMs: now.getTime(), hours, thresholdKm });
+  }, [clock]);
+
+  /** Jump to 30 s before a close approach with both satellites selected; the camera follows the first. */
+  const showApproach = useCallback((approach: CloseApproach) => {
+    clock.setTime(approach.tcaMs - 30_000);
+    showSatellite(approach.b.satelliteId);
+    showSatellite(approach.a.satelliteId);
+  }, [clock, showSatellite]);
+
+  const goLive = useCallback(() => clock.goLive(), [clock]);
+
+  const getSkyView = useCallback((who: Observer) => skyView(who, satTlesRef.current, clock.nowMs()), [clock]);
+
+  // Coverage map: recount when it's switched on, the satellites change, time jumps, and every 30 s as they move.
+  useEffect(() => {
+    const heatmap = coverageHeatmapRef.current;
+    if (coverageMinElevation === null || !heatmap) {
+      heatmap?.hide();
+      return;
+    }
+    const update = () => {
+      const now = clock.now();
+      const positions: { lat: number; lng: number; altKm: number }[] = [];
+      for (const t of satTlesRef.current) {
+        const geo = propagateToGeodetic(t.satrec, now);
+        if (geo) positions.push({ lat: geo.lat, lng: geo.lng, altKm: geo.alt });
+      }
+      const grid = coverageGrid(positions, coverageMinElevation);
+      heatmap.show(grid);
+      setCoverageMax(grid.max);
+    };
+    update();
+    const timer = window.setInterval(update, 30_000);
+    const unsubscribe = clock.subscribe(update);
+    return () => {
+      window.clearInterval(timer);
+      unsubscribe();
+      heatmap.hide();
+    };
+  }, [coverageMinElevation, tleVersion, clock, globeInitialized]);
 
   /** Hovering a satellite in the scatter plot lights it up on the globe (the followed one otherwise). */
   const hoverSatellite = useCallback((id: number | null) => {
@@ -2002,6 +2077,17 @@ export default function GlobeView({ mode = "satellite-tracker" }: GlobeViewProps
                     onHoverSatellite={hoverSatellite}
                     globeHover={globeHoverStore}
                     trackerUrl={trackerUrl}
+                    filterLabel={satCompany !== "All" ? `${satType} / ${satCompany}` : satType}
+                    onProject={projectFeatures}
+                    onFindApproaches={findApproaches}
+                    onShowApproach={showApproach}
+                    onGoLive={goLive}
+                    observer={observer}
+                    onObserverChange={setObserver}
+                    getSkyView={getSkyView}
+                    coverageMinElevation={coverageMinElevation}
+                    onCoverageChange={setCoverageMinElevation}
+                    coverageMax={coverageMax}
                   />
                 )}
               </WithStats>

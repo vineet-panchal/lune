@@ -95,8 +95,11 @@ export type OrbitQuantities = {
 
 export type OrbitAxis = keyof OrbitQuantities;
 
-/** One drawn satellite's orbit values, for the scatter plot and cluster stats. */
-export type OrbitPoint = OrbitQuantities & { satelliteId: number; name: string };
+/**
+ * One drawn satellite's orbit values, for the scatter plot, cluster stats and constellation health.
+ * argLatDeg is where along its orbit it is (argument of latitude: degrees past the ascending node).
+ */
+export type OrbitPoint = OrbitQuantities & { satelliteId: number; name: string; argLatDeg: number };
 
 export const ORBIT_AXES: { id: OrbitAxis; label: string; unit: string }[] = [
   { id: "altitudeKm", label: "Altitude", unit: "km" },
@@ -117,6 +120,17 @@ export function orbitQuantities(satrec: satellite.SatRec, atMs: number): OrbitQu
   };
 }
 
+/** Argument of latitude at atMs (degrees, 0–360): perigee argument plus mean anomaly, both carried from the epoch. */
+export function argumentOfLatitudeDeg(satrec: satellite.SatRec, atMs: number): number {
+  const minutes = minutesSinceEpoch(satrec, atMs);
+  const u = (satrec.argpo + satrec.argpdot * minutes + satrec.mo + satrec.mdot * minutes) * RAD_TO_DEG;
+  return ((u % 360) + 360) % 360;
+}
+
+function minutesSinceEpoch(satrec: satellite.SatRec, atMs: number): number {
+  return (atMs / 86_400_000 + JD_UNIX_EPOCH - satrec.jdsatepoch) * 1440;
+}
+
 /** Semi-major axis from the mean motion, minus Earth's radius. */
 function meanAltitudeKm(satrec: satellite.SatRec): number {
   const meanMotionRadS = satrec.no / 60; // no is radians per minute
@@ -128,6 +142,5 @@ function meanAltitudeKm(satrec: satellite.SatRec): number {
  * and every TLE has its own epoch, so comparing raw TLE values would split one plane into many.
  */
 function raanAt(satrec: satellite.SatRec, atMs: number): number {
-  const minutesSinceEpoch = (atMs / 86_400_000 + JD_UNIX_EPOCH - satrec.jdsatepoch) * 1440;
-  return satrec.nodeo + satrec.nodedot * minutesSinceEpoch;
+  return satrec.nodeo + satrec.nodedot * minutesSinceEpoch(satrec, atMs);
 }

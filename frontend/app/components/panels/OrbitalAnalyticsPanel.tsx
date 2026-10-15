@@ -3,13 +3,17 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   fetchAnalyticsHealth,
+  type CloseApproach,
+  type CloseApproachesResponse,
   type KDistanceResponse,
   type KSweepResponse,
+  type ProjectionResponse,
 } from "../../lib/api";
 import { ALGORITHM_LABELS, type ClusterAlgorithm } from "../../lib/clusterLabels";
 import type { ClusterRun } from "../../lib/clusterExport";
 import {
   DEFAULT_ELEMENTS,
+  featureNames,
   ORBITAL_ELEMENTS,
   STALE_AFTER_MS,
   type FeatureSelection,
@@ -17,10 +21,17 @@ import {
   type OrbitalElement,
   type OrbitPoint,
 } from "../../lib/clusterFeatures";
+import type { SkyView } from "../../lib/coverage";
+import type { Observer } from "../../lib/passes";
+import { loadSavedRuns, saveRun, type SavedRun } from "../../lib/savedRuns";
 import type { ReadableStore } from "../../lib/store";
+import CloseApproaches from "./analytics/CloseApproaches";
 import ClusterInspector from "./analytics/ClusterInspector";
+import ConstellationHealthView from "./analytics/ConstellationHealthView";
+import MySky from "./analytics/MySky";
 import OrbitChanges, { type ChangeKind } from "./analytics/OrbitChanges";
-import OrbitScatter from "./analytics/OrbitScatter";
+import OrbitScatter, { type ModelProjection } from "./analytics/OrbitScatter";
+import SavedRuns from "./analytics/SavedRuns";
 import { KDistanceChart, KSweepChart } from "./analytics/SweepChart";
 import { buttonStyle, chipStyle, errorStyle, hintStyle, sectionStyle, sectionTitleStyle } from "./analytics/ui";
 
@@ -86,6 +97,19 @@ type OrbitalAnalyticsPanelProps = {
   globeHover: ReadableStore<number | null>;
   /** A Satellite Tracker link with (up to 10 of) these satellites selected. */
   trackerUrl: (ids: number[]) => string;
+  /** The satellite filter in use, e.g. "Internet / Starlink" (saved with runs). */
+  filterLabel: string;
+  /** PCA of the chosen features for the loaded satellites (ids in the same order as coords). */
+  onProject: (features: FeatureSelection) => Promise<ProjectionResponse & { ids: number[] }>;
+  onFindApproaches: (hours: number, thresholdKm: number) => Promise<CloseApproachesResponse>;
+  onShowApproach: (approach: CloseApproach) => void;
+  onGoLive: () => void;
+  observer: Observer | null;
+  onObserverChange: (observer: Observer | null) => void;
+  getSkyView: (observer: Observer) => SkyView | null;
+  coverageMinElevation: number | null;
+  onCoverageChange: (minElevationDeg: number | null) => void;
+  coverageMax: number;
   /**
    * "sidebar": fills the dock's right-hand column (desktop / tablet); "sheet": inside the phone
    * bottom sheet. Omitted: positions itself as a full-height sidebar.
@@ -126,10 +150,32 @@ const FEATURE_SET_OPTIONS: { id: FeatureSet; label: string; description: string 
   },
 ];
 
-type Focus =
-  | { kind: "cluster"; label: number; run: ClusterRun }
-  | { kind: "changes"; change: ChangeKind; ids: number[] }
-  | null;
+/**
+ * What stays bright on the globe and in the scatter plot: one cluster of the current run, or any other set of
+ * satellites (a kind of orbit change, a shell or plane, close approaches, satellites that changed group), by key.
+ */
+type Focus = { kind: "cluster"; label: number; run: ClusterRun } | { kind: "ids"; key: string; ids: number[] } | null;
+
+type Tab = "models" | "explore" | "fleet" | "events" | "sky";
+const TABS: { id: Tab; label: string }[] = [
+  { id: "models", label: "Models" },
+  { id: "explore", label: "Explore" },
+  { id: "fleet", label: "Fleet" },
+  { id: "events", label: "Events" },
+  { id: "sky", label: "My sky" },
+];
+
+/** Readable names for feature columns, to say what drives each PCA axis. */
+const FEATURE_LABELS: Record<string, string> = {
+  mean_altitude_km: "altitude",
+  inclination_deg: "inclination",
+  raan_sin: "orbital plane",
+  raan_cos: "orbital plane",
+  eccentricity: "eccentricity",
+  x_km: "x",
+  y_km: "y",
+  z_km: "z",
+};
 
 export default function OrbitalAnalyticsPanel({
   satelliteSampleCount,
@@ -149,8 +195,20 @@ export default function OrbitalAnalyticsPanel({
   onHoverSatellite,
   globeHover,
   trackerUrl,
+  filterLabel,
+  onProject,
+  onFindApproaches,
+  onShowApproach,
+  onGoLive,
+  observer,
+  onObserverChange,
+  getSkyView,
+  coverageMinElevation,
+  onCoverageChange,
+  coverageMax,
   variant,
 }: OrbitalAnalyticsPanelProps) {
+  const [tab, setTab] = useState<Tab>("models");
   const [polledHealth, setHealth] = useState<Health>("checking");
   useEffect(() => {
     let cancelled = false;
@@ -253,7 +311,7 @@ export default function OrbitalAnalyticsPanel({
   const focus = focusState?.kind === "cluster" && focusState.run !== clusterSummary?.run ? null : focusState;
   const focusIds = useMemo(() => {
     if (!focus) return null;
-    if (focus.kind === "changes") return new Set(focus.ids);
+    if (focus.kind === "ids") return new Set(focus.ids);
     return new Set(focus.run.rows.filter((r) => r.label === focus.label).map((r) => r.satelliteId));
   }, [focus]);
   useEffect(() => {
@@ -266,6 +324,75 @@ export default function OrbitalAnalyticsPanel({
     [clusterSummary]
   );
   const loadedIds = useMemo(() => orbitPoints.map((p) => p.satelliteId), [orbitPoints]);
+  const focusedKey = focus?.kind === "ids" ? focus.key : null;
+  const focusIdsFor = (key: string | null, ids: number[]) => setFocus(key === null ? null : { kind: "ids", key, ids });
+
+  // Model view (PCA) for the scatter plot, kept until the feature choice changes.
+  const featuresKey = JSON.stringify(features);
+  const [projection, setProjection] = useState<{ key: string; data: ModelProjection } | null>(null);
+  const [projectionBusy, setProjectionBusy] = useState(false);
+  const [projectionError, setProjectionError] = useState<string | null>(null);
+  const requestProjection = async () => {
+    if (!featuresReady) {
+      setProjectionError("Pick at least one orbital element on the Models tab first.");
+      return;
+    }
+    const key = featuresKey;
+    setProjectionBusy(true);
+    setProjectionError(null);
+    try {
+      const res = await onProject(features);
+      const names = featureNames(features);
+      setProjection({
+        key,
+        data: {
+          coords: new Map(res.ids.map((id, i) => [id, res.coords[i]])),
+          explained: res.explainedVariance,
+          drivers: res.loadings.map((row) => topDrivers(row, names)),
+          featuresLine:
+            features.set === "position"
+              ? "position (x, y, z)"
+              : ORBITAL_ELEMENTS.filter((e) => elements.includes(e.id)).map((e) => e.label.toLowerCase()).join(", "),
+        },
+      });
+    } catch (e) {
+      setProjectionError(e instanceof Error ? e.message : "Projection failed");
+    } finally {
+      setProjectionBusy(false);
+    }
+  };
+
+  // Saved runs live in this browser (localStorage), read after mount so server and client render alike.
+  const [savedRuns, setSavedRuns] = useState<SavedRun[]>([]);
+  useEffect(() => {
+    try {
+      setSavedRuns(loadSavedRuns());
+    } catch {
+      /* storage unavailable: start with none */
+    }
+  }, []);
+  const [savedFor, setSavedFor] = useState<number | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const saveCurrentRun = () => {
+    if (!clusterSummary) return;
+    try {
+      setSavedRuns(
+        saveRun({
+          filter: filterLabel,
+          algorithm: clusterSummary.algorithm,
+          paramsLine: clusterSummary.paramsLine,
+          featuresLine: clusterSummary.featuresLine,
+          computedAtMs: clusterSummary.computedAtMs,
+          ids: clusterSummary.run.rows.map((r) => r.satelliteId),
+          labels: clusterSummary.run.rows.map((r) => r.label),
+        })
+      );
+      setSavedFor(clusterSummary.computedAtMs);
+      setSaveError(null);
+    } catch {
+      setSaveError("Couldn't save: this browser's storage is full or blocked.");
+    }
+  };
 
   const slider = (label: string, value: number, display: string, min: number, max: number, step: number, onChange: (v: number) => void) => (
     <>
@@ -313,6 +440,16 @@ export default function OrbitalAnalyticsPanel({
         (scikit-learn) via Spring Boot; the globe colours update from the returned labels.
       </p>
 
+      <div role="tablist" aria-label="Analytics sections" style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 14 }}>
+        {TABS.map((t) => (
+          <button key={t.id} type="button" role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)} style={{ ...chipStyle(tab === t.id), padding: "5px 9px" }}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "models" && (
+      <>
       <section style={sectionStyle}>
         <div style={sectionTitleStyle}>Compare satellites by</div>
         <div role="tablist" aria-label="Features" style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
@@ -506,40 +643,115 @@ export default function OrbitalAnalyticsPanel({
             onHover={onHoverSatellite}
             trackerUrl={trackerUrl}
           />
-          <button
-            type="button"
-            onClick={onExportCsv}
-            title="Download every satellite with its label and the features the model saw"
-            style={{ ...buttonStyle(), marginTop: 12 }}
-          >
-            Export CSV
-          </button>
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={onExportCsv}
+              title="Download every satellite with its label and the features the model saw"
+              style={buttonStyle()}
+            >
+              Export CSV
+            </button>
+            <button
+              type="button"
+              onClick={saveCurrentRun}
+              disabled={savedFor === clusterSummary.computedAtMs}
+              title="Keep this run in this browser to compare later runs against it"
+              style={buttonStyle(savedFor !== clusterSummary.computedAtMs)}
+            >
+              {savedFor === clusterSummary.computedAtMs ? "Saved ✓" : "Save run"}
+            </button>
+          </div>
+          {saveError && <div style={{ ...errorStyle, marginTop: 8 }}>{saveError}</div>}
         </section>
       )}
 
       <section style={sectionStyle}>
-        <div style={sectionTitleStyle}>Explore orbits</div>
-        <OrbitScatter
-          points={orbitPoints}
-          labelById={labelById}
-          algorithm={clusterSummary?.algorithm ?? null}
-          focusIds={focusIds}
-          globeHover={globeHover}
-          onHover={onHoverSatellite}
-          onPick={onShowSatellite}
-        />
-      </section>
-
-      <section style={sectionStyle}>
-        <div style={sectionTitleStyle}>Orbit changes</div>
-        <OrbitChanges
-          loadedIds={loadedIds}
-          focusedKind={focus?.kind === "changes" ? focus.change : null}
-          onFocusKind={(change, ids) => setFocus(change === null ? null : { kind: "changes", change, ids })}
+        <div style={sectionTitleStyle}>Saved runs</div>
+        <SavedRuns
+          runs={savedRuns}
+          onRunsChange={setSavedRuns}
+          current={clusterSummary}
+          focusedRunId={focusedKey?.startsWith("run:") ? focusedKey.slice(4) : null}
+          onFocusChanged={(runId, ids) => focusIdsFor(runId === null ? null : `run:${runId}`, ids)}
           onShow={onShowSatellite}
           onHover={onHoverSatellite}
         />
       </section>
+      </>
+      )}
+
+      {tab === "explore" && (
+        <section style={sectionStyle}>
+          <div style={sectionTitleStyle}>Explore orbits</div>
+          <OrbitScatter
+            points={orbitPoints}
+            labelById={labelById}
+            algorithm={clusterSummary?.algorithm ?? null}
+            focusIds={focusIds}
+            globeHover={globeHover}
+            onHover={onHoverSatellite}
+            onPick={onShowSatellite}
+            projection={projection?.data ?? null}
+            projectionCurrent={projection?.key === featuresKey}
+            projectionBusy={projectionBusy}
+            projectionError={projectionError}
+            onRequestProjection={() => void requestProjection()}
+          />
+        </section>
+      )}
+
+      {tab === "fleet" && (
+        <section style={sectionStyle}>
+          <div style={sectionTitleStyle}>Constellation health</div>
+          <ConstellationHealthView points={orbitPoints} focusedKey={focusedKey} onFocus={focusIdsFor} />
+        </section>
+      )}
+
+      {tab === "events" && (
+        <>
+          <section style={sectionStyle}>
+            <div style={sectionTitleStyle}>Close approaches</div>
+            <CloseApproaches
+              loadedCount={orbitPoints.length}
+              onFind={onFindApproaches}
+              onShowApproach={(a) => {
+                focusIdsFor(`approach:${a.a.satelliteId}-${a.b.satelliteId}`, [a.a.satelliteId, a.b.satelliteId]);
+                onShowApproach(a);
+              }}
+              onGoLive={onGoLive}
+              getNow={getNow}
+              focusedKey={focusedKey}
+              onFocus={focusIdsFor}
+            />
+          </section>
+          <section style={sectionStyle}>
+            <div style={sectionTitleStyle}>Orbit changes</div>
+            <OrbitChanges
+              loadedIds={loadedIds}
+              focusedKind={focusedKey?.startsWith("changes:") ? (focusedKey.slice(8) as ChangeKind) : null}
+              onFocusKind={(change, ids) => focusIdsFor(change === null ? null : `changes:${change}`, ids)}
+              onShow={onShowSatellite}
+              onHover={onHoverSatellite}
+            />
+          </section>
+        </>
+      )}
+
+      {tab === "sky" && (
+        <section style={sectionStyle}>
+          <MySky
+            observer={observer}
+            onObserverChange={onObserverChange}
+            getSkyView={getSkyView}
+            coverageMinElevation={coverageMinElevation}
+            onCoverageChange={onCoverageChange}
+            coverageMax={coverageMax}
+            onShow={onShowSatellite}
+            onHover={onHoverSatellite}
+          />
+        </section>
+      )}
 
       {health === "offline" && (
         <section style={{ marginTop: 16, color: "rgba(170,182,204,0.7)", fontSize: 10, lineHeight: 1.55 }}>
@@ -576,4 +788,20 @@ function formatGap(ms: number): string {
   if (minutes < 60) return `${minutes} min`;
   const hours = Math.round(minutes / 60);
   return hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} days`;
+}
+
+/** The one or two features that make up most of a PCA axis, e.g. "inclination, altitude". */
+function topDrivers(loadings: number[], names: string[]): string {
+  const byLabel = new Map<string, number>();
+  loadings.forEach((w, i) => {
+    const label = FEATURE_LABELS[names[i]] ?? names[i];
+    byLabel.set(label, (byLabel.get(label) ?? 0) + w * w);
+  });
+  const ranked = [...byLabel].sort((a, b) => b[1] - a[1]);
+  const total = ranked.reduce((sum, [, v]) => sum + v, 0) || 1;
+  return ranked
+    .filter(([, v], i) => i === 0 || v / total > 0.25)
+    .slice(0, 2)
+    .map(([label]) => label)
+    .join(", ");
 }
