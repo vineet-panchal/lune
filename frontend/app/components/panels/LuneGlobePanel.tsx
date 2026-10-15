@@ -25,6 +25,8 @@ type LuneGlobePanelProps = {
   dataSource: string | null;
   tleUpdatedAt: string | null;
   loading: boolean;
+  /** Showing an exact list of satellites (e.g. one launch's, from Mission Control) instead of a type filter. */
+  customList?: { label: string; onClear: () => void } | null;
 };
 
 type SearchSuggestion = {
@@ -55,6 +57,7 @@ export default function LuneGlobePanel({
   dataSource,
   tleUpdatedAt,
   loading,
+  customList,
 }: LuneGlobePanelProps) {
   return (
     <div
@@ -178,7 +181,20 @@ export default function LuneGlobePanel({
           <span style={{ fontWeight: 600 }}>Filter By Type</span>
           <span style={{ fontSize: 10, opacity: 0.6 }}>{activePanel === "filter" ? "▾" : "▸"}</span>
         </div>
-        {activePanel === "filter" && (
+        {activePanel === "filter" && customList && (
+          <div style={{ padding: "8px 4px 4px" }}>
+            <div style={{ color: "rgba(255,255,255,0.6)", fontSize: 11, marginBottom: 2 }}>Showing from Mission Control:</div>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>{customList.label}</div>
+            <button
+              type="button"
+              onClick={customList.onClear}
+              style={{ fontSize: 11, padding: "3px 8px", borderRadius: 6, background: "#222", color: "#fff", border: "1px solid rgba(255,255,255,0.2)", cursor: "pointer", fontFamily: "inherit" }}
+            >
+              Back to filters
+            </button>
+          </div>
+        )}
+        {activePanel === "filter" && !customList && (
           <div style={{ padding: "8px 4px 4px" }}>
             <div style={{ marginBottom: 6 }}>
               <label htmlFor="sat-type-select" style={{ marginRight: 8 }}>Type:</label>
