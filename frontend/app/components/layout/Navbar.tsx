@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
 
-export type NavbarPage = "satellite-tracker" | "orbital-intelligence" | "constellations" | "mission-control";
+export type NavbarPage = "satellite-tracker" | "orbital-intelligence" | "constellations" | "mission-control" | "trips";
 
 type NavbarProps = {
   current: NavbarPage;
@@ -17,7 +17,7 @@ const PAGES: { label: string; href?: string; page?: NavbarPage }[] = [
   { label: "Orbital Intelligence", href: "/orbital-intelligence", page: "orbital-intelligence" },
   { label: "Constellations", href: "/constellations", page: "constellations" },
   { label: "Mission Control", href: "/mission-control", page: "mission-control" },
-  { label: "Trips" },
+  { label: "Trips", href: "/trips", page: "trips" },
 ];
 
 function navButtonStyle(active: boolean): CSSProperties {
