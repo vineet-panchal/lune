@@ -76,6 +76,8 @@ lune/
 
 ## 📋 Quick Start
 
+To deploy all three services to Railway, see [DEPLOY.md](DEPLOY.md).
+
 ### Backend (Java)
 
 ```bash
